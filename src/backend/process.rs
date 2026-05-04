@@ -13,7 +13,7 @@ pub struct Backend {
 
 impl Backend {
     pub fn spawn(script: &str, model_path: &str) -> Result<Self> {
-        let mut child = Command::new("python3")
+        let mut child = Command::new("python.exe")
             .arg(script)
             .arg(model_path)
             .stdin(Stdio::piped())

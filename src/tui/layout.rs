@@ -17,7 +17,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             Constraint::Length(3),
             Constraint::Length(1),
         ])
-        .split(f.area());
+        .split(f.size());
 
     let main_area = root[0];
     let input_area = root[1];
