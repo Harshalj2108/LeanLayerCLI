@@ -19,18 +19,36 @@ pub async fn run() -> Result<()> {
     let cfg = config::load()?;
 
     enable_raw_mode()?;
+    let _ = crossterm::event::poll(std::time::Duration::from_millis(0));
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(
+        stdout,
+        EnterAlternateScreen,
+        EnableMouseCapture,
+        crossterm::terminal::DisableLineWrap,
+    )?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new(cfg).await?;
+    let mut last_response_len = 0;
 
     loop {
-        terminal.draw(|f| layout::draw(f, &mut app))?;
+        app.tick();
 
-        if event::poll(Duration::from_millis(16))? {
+        let current_len = app.current_response.len() + app.messages.len();
+        if current_len != last_response_len || !app.is_generating {
+            terminal.draw(|f| layout::draw(f, &mut app))?;
+            last_response_len = current_len;
+        }
+
+        if event::poll(Duration::from_millis(10))? {
             if let Event::Key(key) = event::read()? {
+                while event::poll(Duration::from_millis(0))? {
+                    let _ = event::read()?;
+                }
+                terminal.draw(|f| layout::draw(f, &mut app))?;
+                last_response_len = app.current_response.len() + app.messages.len();
                 match (key.code, key.modifiers) {
                     (KeyCode::Char('q'), KeyModifiers::NONE) => {
                         app.quit().await?;

@@ -9,10 +9,13 @@ license = "Apache-2.0"
 name = "airllm"
 path = "src/main.rs"
 
+
+
 [dependencies]
 # TUI
 ratatui = "0.26"
 crossterm = "0.27"
+ureq = { version = "2", features = ["json"] }
 
 # Async
 tokio = { version = "1", features = ["full"] }
