@@ -94,8 +94,3 @@ Load transformer model layers **sequentially from disk** into GPU memory, run in
 | Deployment | Python env required | Single binary |
 | GIL Overhead | Yes | No |
 
-## License
-
-Planned: Apache-2.0 (matching AirLLM)
-
----
