@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 
 use crate::backend::{
     process::Backend,
-    protocol::{BackendMessage, ChatMessage, FrontendMessage},
+    protocol::{BackendMessage, ChatMessage},
 };
 use crate::config::Config;
 use crate::memory::{
@@ -30,15 +30,14 @@ pub struct App {
     pub graph: MemoryGraph,
     backend: Backend,
     pub scroll: usize,
+    pub token_rx: Option<mpsc::UnboundedReceiver<BackendMessage>>,
 }
 
 impl App {
     pub async fn new(cfg: Config) -> Result<Self> {
-        let status = "Loading model...".to_string();
         let backend = Backend::spawn(&cfg.backend_script, &cfg.model_path)?;
         let graph = MemoryGraph::load(&std::path::PathBuf::from(&cfg.vault_path))?;
 
-        // Inject recent memory as system context
         let mut messages = Vec::new();
         let context = build_context(&graph, cfg.max_context_nodes);
         if !context.is_empty() {
@@ -60,6 +59,7 @@ impl App {
             graph,
             backend,
             scroll: 0,
+            token_rx: None,
         })
     }
 
@@ -70,12 +70,48 @@ impl App {
         };
     }
 
+    pub fn tick(&mut self) {
+        if let Some(rx) = &mut self.token_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(BackendMessage::Token { content }) => {
+                        self.current_response.push_str(&content);
+                    }
+                    Ok(BackendMessage::Done) => {
+                        self.messages.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: self.current_response.clone(),
+                        });
+                        self.current_response.clear();
+                        self.is_generating = false;
+                        self.status = "Ready".into();
+                        self.token_rx = None;
+                        break;
+                    }
+                    Ok(BackendMessage::Error { message }) => {
+                        self.status = format!("Error: {}", message);
+                        self.is_generating = false;
+                        self.token_rx = None;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        self.is_generating = false;
+                        self.token_rx = None;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
     pub async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         match self.focus {
             Focus::Chat => match key.code {
                 KeyCode::Char(c) => self.input.push(c),
                 KeyCode::Backspace => { self.input.pop(); }
-                KeyCode::Enter => self.submit().await?,
+                KeyCode::Enter => self.submit()?,
                 KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
                 KeyCode::Down => self.scroll += 1,
                 _ => {}
@@ -89,7 +125,7 @@ impl App {
         Ok(())
     }
 
-    async fn submit(&mut self) -> Result<()> {
+    fn submit(&mut self) -> Result<()> {
         let content = self.input.trim().to_string();
         if content.is_empty() || self.is_generating {
             return Ok(());
@@ -105,67 +141,38 @@ impl App {
         self.current_response.clear();
         self.status = "Generating...".into();
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.token_rx = Some(rx);
 
-        self.backend.send(&FrontendMessage::Generate {
-            messages: self.messages.clone(),
-        })?;
-
-        // Stream tokens synchronously (backend is blocking I/O)
-        // In a real async setup you'd offload this to a thread
-        let tx_clone = tx.clone();
-        self.backend.stream_response(&tx_clone)?;
-
-        while let Ok(msg) = rx.try_recv() {
-            match msg {
-                BackendMessage::Token { content } => {
-                    self.current_response.push_str(&content);
-                }
-                BackendMessage::Done => {
-                    self.messages.push(ChatMessage {
-                        role: "assistant".into(),
-                        content: self.current_response.clone(),
-                    });
-                    self.current_response.clear();
-                    self.is_generating = false;
-                    self.status = "Ready".into();
-                }
-                BackendMessage::Error { message } => {
-                    self.status = format!("Error: {}", message);
-                    self.is_generating = false;
-                }
-                _ => {}
-            }
-        }
+        self.backend.send_generate(self.messages.clone(), tx);
 
         Ok(())
     }
 
     pub async fn quit(&mut self) -> Result<()> {
         if self.cfg.summarize_on_exit && self.messages.len() > 1 {
-            self.status = "Summarizing session...".into();
-
-            // Filter out system messages for summarization
             let history: Vec<ChatMessage> = self.messages.iter()
                 .filter(|m| m.role != "system")
                 .cloned()
                 .collect();
 
             if !history.is_empty() {
-                match summarize_session(&mut self.backend, &history) {
-                    Ok(summary) => {
-                        let vault = VaultWriter::new(&self.cfg)?;
-                        vault.write_session(
-                            &summary.summary,
-                            &summary.concepts,
-                            &summary.related,
-                            &history,
-                        )?;
+                let cfg = self.cfg.clone();
+                std::thread::spawn(move || {
+                    let mut b = crate::backend::process::Backend {
+                        base_url: "http://127.0.0.1:8081".into(),
+                    };
+                    if let Ok(summary) = summarize_session(&mut b, &history) {
+                        if let Ok(vault) = VaultWriter::new(&cfg) {
+                            let _ = vault.write_session(
+                                &summary.summary,
+                                &summary.concepts,
+                                &summary.related,
+                                &history,
+                            );
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("Failed to summarize: {}", e);
-                    }
-                }
+                });
             }
         }
 
@@ -182,7 +189,11 @@ fn build_context(graph: &MemoryGraph, max_nodes: usize) -> String {
 
     let mut ctx = String::from("You have the following memory from previous conversations:\n\n");
     for node in nodes {
-        ctx.push_str(&format!("- [{}] connected to: {}\n", node.label, node.connections.join(", ")));
+        ctx.push_str(&format!(
+            "- [{}] connected to: {}\n",
+            node.label,
+            node.connections.join(", ")
+        ));
     }
     ctx.push_str("\nUse this context where relevant.");
     ctx
