@@ -1,7 +1,6 @@
+use ureq;
 use anyhow::Result;
-use crate::backend::{process::Backend, protocol::{ChatMessage, FrontendMessage}};
-use tokio::sync::mpsc;
-use crate::backend::protocol::BackendMessage;
+use crate::backend::protocol::ChatMessage;
 
 pub struct SessionSummary {
     pub summary: String,
@@ -9,8 +8,7 @@ pub struct SessionSummary {
     pub related: Vec<String>,
 }
 
-pub fn summarize_session(backend: &mut Backend, history: &[ChatMessage]) -> Result<SessionSummary> {
-    // Build a transcript for Gemma to summarize
+pub fn summarize_session(_backend: &mut crate::backend::process::Backend, history: &[ChatMessage]) -> Result<SessionSummary> {
     let transcript = history
         .iter()
         .map(|m| format!("{}: {}", m.role, m.content))
@@ -18,69 +16,49 @@ pub fn summarize_session(backend: &mut Backend, history: &[ChatMessage]) -> Resu
         .join("\n");
 
     let prompt = format!(
-        r#"You are summarizing a conversation for long-term memory storage in an Obsidian vault.
-
-Given this conversation transcript:
-{}
-
-Respond ONLY with a JSON object in this exact format, no other text:
+        r#"Summarize this conversation for Obsidian vault storage. Respond ONLY with JSON, no other text:
 {{
-  "summary": "2-3 sentence summary of what was discussed",
-  "concepts": ["concept1", "concept2", "concept3"],
-  "related": ["related-topic1", "related-topic2"]
+  "summary": "2-3 sentence summary",
+  "concepts": ["concept1", "concept2"],
+  "related": ["topic1", "topic2"]
 }}
 
-concepts: key technical topics, tools, or ideas discussed (2-6 items, lowercase, hyphenated)
-related: broader topics this connects to from previous knowledge"#,
+Conversation:
+{}"#,
         transcript
     );
 
-    let messages = vec![ChatMessage {
-        role: "user".into(),
-        content: prompt,
-    }];
+    let body = serde_json::json!({
+        "model": "local",
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": false,
+        "temperature": 0.3,
+    });
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    backend.send(&FrontendMessage::Generate { messages })?;
+    let resp = ureq::post("http://127.0.0.1:8081/v1/chat/completions")
+        .set("Content-Type", "application/json")
+        .send_string(&body.to_string())?;
 
-    let tx_clone = tx.clone();
-    backend.stream_response(&tx_clone)?;
+    let json: serde_json::Value = resp.into_json()?;
+    let text = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
 
-    let mut full_response = String::new();
-    while let Ok(msg) = rx.try_recv() {
-        if let BackendMessage::Token { content } = msg {
-            full_response.push_str(&content);
-        }
-    }
-
-    // Parse JSON response
-    let trimmed = full_response.trim();
-    let start = trimmed.find('{').unwrap_or(0);
-    let end = trimmed.rfind('}').map(|i| i + 1).unwrap_or(trimmed.len());
-    let json_str = &trimmed[start..end];
-
-    let parsed: serde_json::Value = serde_json::from_str(json_str)
+    let start = text.find('{').unwrap_or(0);
+    let end = text.rfind('}').map(|i| i + 1).unwrap_or(text.len());
+    let parsed: serde_json::Value = serde_json::from_str(&text[start..end])
         .unwrap_or_else(|_| serde_json::json!({
-            "summary": full_response.trim(),
+            "summary": text.trim(),
             "concepts": [],
             "related": []
         }));
 
     Ok(SessionSummary {
         summary: parsed["summary"].as_str().unwrap_or("").to_string(),
-        concepts: parsed["concepts"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| s.to_string())
-            .collect(),
-        related: parsed["related"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(|s| s.to_string())
-            .collect(),
+        concepts: parsed["concepts"].as_array().unwrap_or(&vec![])
+            .iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect(),
+        related: parsed["related"].as_array().unwrap_or(&vec![])
+            .iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect(),
     })
 }
