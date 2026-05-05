@@ -43,24 +43,30 @@ pub async fn run() -> Result<()> {
         }
 
         if event::poll(Duration::from_millis(10))? {
-            if let Event::Key(key) = event::read()? {
-                while event::poll(Duration::from_millis(0))? {
-                    let _ = event::read()?;
-                }
-                terminal.draw(|f| layout::draw(f, &mut app))?;
-                last_response_len = app.current_response.len() + app.messages.len();
-                match (key.code, key.modifiers) {
-                    (KeyCode::Char('q'), KeyModifiers::NONE) => {
-                        app.quit().await?;
-                        break;
+            match event::read()? {
+                Event::Key(key) => {
+                    while event::poll(Duration::from_millis(0))? {
+                        let _ = event::read()?;
                     }
-                    (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                        app.quit().await?;
-                        break;
+                    terminal.draw(|f| layout::draw(f, &mut app))?;
+                    last_response_len = app.current_response.len() + app.messages.len();
+                    match (key.code, key.modifiers) {
+                        (KeyCode::Char('q'), KeyModifiers::NONE) => {
+                            app.quit().await?;
+                            break;
+                        }
+                        (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
+                            app.quit().await?;
+                            break;
+                        }
+                        (KeyCode::Tab, _) => app.toggle_focus(),
+                        _ => app.handle_key(key).await?,
                     }
-                    (KeyCode::Tab, _) => app.toggle_focus(),
-                    _ => app.handle_key(key).await?,
                 }
+                Event::Mouse(mouse) => {
+                    app.handle_mouse(mouse).await?;
+                }
+                _ => {}
             }
         }
 

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind};
 use tokio::sync::mpsc;
 
 use crate::backend::{
@@ -121,6 +121,21 @@ impl App {
                 KeyCode::Down => self.scroll = self.scroll.saturating_sub(1),
                 _ => {}
             },
+        }
+        Ok(())
+    }
+
+    pub async fn handle_mouse(&mut self, mouse: MouseEvent) -> Result<()> {
+        match mouse.kind {
+            MouseEventKind::ScrollUp => {
+                // Scroll wheel up = move viewport to older messages
+                self.scroll += 3;
+            }
+            MouseEventKind::ScrollDown => {
+                // Scroll wheel down = move viewport to newer messages
+                self.scroll = self.scroll.saturating_sub(3);
+            }
+            _ => {}
         }
         Ok(())
     }
