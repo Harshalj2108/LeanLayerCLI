@@ -159,17 +159,25 @@ fn draw_input(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
+    let (mode_str, mode_color) = if app.thinking_mode {
+        ("[DEEP]", Color::Cyan)
+    } else {
+        ("[FAST]", Color::Yellow)
+    };
+
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" airllm ", Style::default().fg(Color::Black).bg(Color::Cyan)),
         Span::raw("  "),
         Span::styled(&app.status, Style::default().fg(Color::DarkGray)),
         Span::raw("   "),
+        Span::styled(mode_str, Style::default().fg(mode_color)),
+        Span::raw("   "),
+        Span::styled("m", Style::default().fg(Color::Cyan)),
+        Span::raw(": toggle mode   "),
         Span::styled("tab", Style::default().fg(Color::Cyan)),
-        Span::raw(": switch panel  "),
+        Span::raw(": switch   "),
         Span::styled("q", Style::default().fg(Color::Cyan)),
-        Span::raw(": quit & save  "),
-        Span::styled("↑↓", Style::default().fg(Color::Cyan)),
-        Span::raw(": scroll"),
+        Span::raw(": quit"),
     ]));
 
     f.render_widget(status, area);

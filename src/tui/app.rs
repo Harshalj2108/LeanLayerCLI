@@ -28,6 +28,7 @@ pub struct App {
     pub status: String,
     pub should_quit: bool,
     pub graph: MemoryGraph,
+    pub thinking_mode: bool,
     backend: Backend,
     pub scroll: usize,
     pub token_rx: Option<mpsc::UnboundedReceiver<BackendMessage>>,
@@ -57,6 +58,7 @@ impl App {
             status: "Ready".into(),
             should_quit: false,
             graph,
+            thinking_mode: false,
             backend,
             scroll: 0,
             token_rx: None,
@@ -68,6 +70,10 @@ impl App {
             Focus::Chat => Focus::Graph,
             Focus::Graph => Focus::Chat,
         };
+    }
+
+    pub fn toggle_thinking_mode(&mut self) {
+        self.thinking_mode = !self.thinking_mode;
     }
 
     pub fn tick(&mut self) {
@@ -159,7 +165,7 @@ impl App {
         let (tx, rx) = mpsc::unbounded_channel();
         self.token_rx = Some(rx);
 
-        self.backend.send_generate(self.messages.clone(), tx);
+        self.backend.send_generate(self.messages.clone(), tx, self.thinking_mode);
 
         Ok(())
     }

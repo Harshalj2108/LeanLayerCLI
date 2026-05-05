@@ -59,6 +59,9 @@ pub async fn run() -> Result<()> {
                             app.quit().await?;
                             break;
                         }
+                        (KeyCode::Char('m'), KeyModifiers::NONE) => {
+                            app.toggle_thinking_mode();
+                        }
                         (KeyCode::Tab, _) => app.toggle_focus(),
                         _ => app.handle_key(key).await?,
                     }

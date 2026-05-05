@@ -174,10 +174,10 @@ airllm config
 +-------------------------------------------+------------------+
 |  > _                                                         |
 +--------------------------------------------------------------+
-|  airllm   Ready   tab: switch panel   q: quit and save   up/down: scroll  |
+|  airllm   Ready   [FAST]   m: toggle mode   tab: switch   q: quit |
 ```
 
-- Left panel: chat history with streaming token display
+- Left panel: chat history with automatic word-wrapping and streaming token display
 - Right panel: memory graph showing linked sessions and concepts
 - Bottom bar: input and keyboard shortcuts
 
@@ -186,10 +186,18 @@ airllm config
 | Key       | Action                        |
 |-----------|-------------------------------|
 | Enter     | Send message                  |
+| m         | Toggle thinking mode (Fast/Deep) |
 | q         | Quit and save session to vault |
 | Ctrl+C    | Quit and save session to vault |
 | Tab       | Switch focus between panels   |
-| Up / Down | Scroll                        |
+| Up / Down | Scroll chat history           |
+| Mouse Scroll| Scroll chat history (faster) |
+
+### Thinking Modes
+
+airllm-rs natively supports toggling between two different reasoning configurations for local models:
+- **Fast Mode (`[FAST]`)**: The default. Optimized for quick queries. Uses a lower temperature (0.6), disables backend thinking parameters, and enforces a streaming filter that actively strips any leaked `<think>` tokens from the output so you only see the final response.
+- **Deep Mode (`[DEEP]`)**: Optimized for coding, math, and complex logic. Increases the temperature (0.7), enables backend thinking structures, and perfectly streams the model's internal chain-of-thought to your screen before it provides the final answer.
 
 ---
 

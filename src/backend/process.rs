@@ -19,6 +19,7 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
+        thinking: bool,
     ) {
         let url = format!("{}/v1/chat/completions", self.base_url);
 
@@ -27,8 +28,11 @@ impl Backend {
                 "model": "local",
                 "messages": messages,
                 "stream": true,
-                "temperature": 0.6,
+                "temperature": if thinking { 0.7 } else { 0.6 },
                 "top_p": 0.95,
+                "chat_template_kwargs": {
+                    "enable_thinking": thinking
+                }
             });
 
             let response = ureq::post(&url)
@@ -42,6 +46,7 @@ impl Backend {
                     let mut buf = [0; 1024];
                     let mut line_buf = String::new();
                     let mut done = false;
+                    let mut in_think = false;
 
                     while !done {
                         match reader.read(&mut buf) {
@@ -67,7 +72,18 @@ impl Backend {
                                                     text.push_str(reasoning);
                                                 }
                                                 if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                                                    text.push_str(content);
+                                                    let mut c = content.to_string();
+                                                    if c.contains("<think>") {
+                                                        in_think = true;
+                                                        c = c.replace("<think>", "");
+                                                    }
+                                                    if c.contains("</think>") {
+                                                        in_think = false;
+                                                        c = c.replace("</think>", "");
+                                                    }
+                                                    if !in_think {
+                                                        text.push_str(&c);
+                                                    }
                                                 }
                                                 if !text.is_empty() {
                                                     tx.send(BackendMessage::Token {
