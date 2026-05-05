@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::io::{BufRead, BufReader};
+
 use tokio::sync::mpsc;
 use super::protocol::{BackendMessage, ChatMessage};
 
@@ -37,28 +37,52 @@ impl Backend {
 
             match response {
                 Ok(resp) => {
-                    let reader = BufReader::new(resp.into_reader());
-                    for line in reader.lines() {
-                        let line = match line {
-                            Ok(l) => l,
-                            Err(_) => break,
-                        };
-                        if !line.starts_with("data:") {
-                            continue;
-                        }
-                        let data = line[5..].trim();
-                        if data == "[DONE]" {
-                            tx.send(BackendMessage::Done).ok();
-                            break;
-                        }
-                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                            if let Some(content) = chunk["choices"][0]["delta"]["content"].as_str() {
-                                if !content.is_empty() {
-                                    tx.send(BackendMessage::Token {
-                                        content: content.to_string(),
-                                    }).ok();
+                    use std::io::Read;
+                    let mut reader = resp.into_reader();
+                    let mut buf = [0; 1024];
+                    let mut line_buf = String::new();
+                    let mut done = false;
+
+                    while !done {
+                        match reader.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                let s = String::from_utf8_lossy(&buf[..n]);
+                                for ch in s.chars() {
+                                    if ch == '\n' {
+                                        if !line_buf.starts_with("data:") {
+                                            line_buf.clear();
+                                            continue;
+                                        }
+                                        let data = line_buf[5..].trim();
+                                        if data == "[DONE]" {
+                                            tx.send(BackendMessage::Done).ok();
+                                            done = true;
+                                            break;
+                                        }
+                                        if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
+                                            if let Some(delta) = chunk["choices"][0]["delta"].as_object() {
+                                                let mut text = String::new();
+                                                if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                                                    text.push_str(reasoning);
+                                                }
+                                                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                                                    text.push_str(content);
+                                                }
+                                                if !text.is_empty() {
+                                                    tx.send(BackendMessage::Token {
+                                                        content: text,
+                                                    }).ok();
+                                                }
+                                            }
+                                        }
+                                        line_buf.clear();
+                                    } else {
+                                        line_buf.push(ch);
+                                    }
                                 }
                             }
+                            Err(_) => break,
                         }
                     }
                 }

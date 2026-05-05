@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Terminal chat UI for AirLLM with Obsidian memory graph"
 license = "Apache-2.0"
+default-run = "airllm"
 
 [[bin]]
 name = "airllm"
