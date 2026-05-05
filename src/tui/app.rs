@@ -112,13 +112,13 @@ impl App {
                 KeyCode::Char(c) => self.input.push(c),
                 KeyCode::Backspace => { self.input.pop(); }
                 KeyCode::Enter => self.submit()?,
-                KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-                KeyCode::Down => self.scroll += 1,
+                KeyCode::Up => self.scroll += 1,
+                KeyCode::Down => self.scroll = self.scroll.saturating_sub(1),
                 _ => {}
             },
             Focus::Graph => match key.code {
-                KeyCode::Up => self.scroll = self.scroll.saturating_sub(1),
-                KeyCode::Down => self.scroll += 1,
+                KeyCode::Up => self.scroll += 1,
+                KeyCode::Down => self.scroll = self.scroll.saturating_sub(1),
                 _ => {}
             },
         }

@@ -74,7 +74,10 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
         ])));
 
         // Word-wrap content lines
-        for line in msg.content.lines() {
+        let wrap_width = inner.width.saturating_sub(4) as usize;
+        let wrap_width = if wrap_width == 0 { 40 } else { wrap_width };
+        let wrapped_lines = textwrap::wrap(&msg.content, wrap_width);
+        for line in wrapped_lines {
             items.push(ListItem::new(Line::from(Span::raw(format!("   {}", line)))));
         }
 
@@ -90,13 +93,22 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled("▍", Style::default().fg(Color::Magenta)),
         ])));
-        for line in app.current_response.lines() {
+        let wrap_width = inner.width.saturating_sub(4) as usize;
+        let wrap_width = if wrap_width == 0 { 40 } else { wrap_width };
+        let wrapped_lines = textwrap::wrap(&app.current_response, wrap_width);
+        for line in wrapped_lines {
             items.push(ListItem::new(Line::from(Span::raw(format!("   {}", line)))));
         }
     }
 
-    let list = List::new(items);
-    f.render_widget(list, inner);
+    let list = List::new(items.clone());
+    let mut state = ratatui::widgets::ListState::default();
+    let total_items = items.len();
+    if total_items > 0 {
+        let selected = total_items.saturating_sub(1).saturating_sub(app.scroll);
+        state.select(Some(selected));
+    }
+    f.render_stateful_widget(list, inner, &mut state);
 }
 
 fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
