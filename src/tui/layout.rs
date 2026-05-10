@@ -61,7 +61,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
         let (label, color) = match msg.role.as_str() {
             "user" => ("You", Color::Green),
-            "assistant" => ("Gemma", Color::Magenta),
+            "assistant" => ("QWEN", Color::Magenta),
             _ => ("System", Color::Yellow),
         };
 
@@ -88,7 +88,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     if !app.current_response.is_empty() {
         items.push(ListItem::new(Line::from(vec![
             Span::styled(
-                " Gemma ",
+                " QWEN ",
                 Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD),
             ),
             Span::styled("▍", Style::default().fg(Color::Magenta)),
