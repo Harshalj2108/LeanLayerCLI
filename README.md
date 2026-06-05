@@ -21,16 +21,16 @@ There is no Python runtime required at runtime, no Obsidian plugins to install, 
 
 ## Key Features
 
-- 🧠 **Contextual Concept RAG & Obsidian Vault:** Automatically summarizes sessions and builds a markdown-based knowledge graph. Dynamically pulls context from past sessions when relevant concepts are mentioned.
-- 🗂️ **Interactive Session Explorer:** Browse, read, and resume past sessions directly from the terminal Memory pane.
-- ⚙️ **Interactive Configuration UI:** Real-time TUI for configuring models, API keys, and settings—no manual file editing required.
-- 🛠️ **Agentic Tools:** The LLM can autonomously execute commands (`run_command`), edit files (`read_file`, `write_file`, `search_files`), and search the internet (`web_search`).
-- ☁️ **Cloud & Local Inference:** Seamlessly switch between local GGUF models (via `llama-server`) and cloud APIs.
-- 🚀 **Zero-Config Subprocess Management:** Automatically launches, manages, and terminates `llama-server` in the background.
-- 🖼️ **Multimodal Support:** Supports multimodal input. Paste images directly from your clipboard to auto-save them to the vault and embed them in your prompts.
-- ⚡ **Thinking Modes:** Quickly toggle between "Fast" mode for rapid responses and "Deep" mode to unlock the model's internal Chain-of-Thought reasoning.
-- 📋 **Code Block Yanker:** Built-in clipboard manager. Easily extract and copy code blocks from the assistant's responses using a dedicated UI modal.
-- 🖱️ **Butter-Smooth TUI:** Fast rendering with mouse scroll wheel support and intuitive shortcuts.
+-  **Contextual Concept RAG & Obsidian Vault:** Automatically summarizes sessions and builds a markdown-based knowledge graph. Dynamically pulls context from past sessions when relevant concepts are mentioned.
+-  **Interactive Session Explorer:** Browse, read, and resume past sessions directly from the terminal Memory pane.
+-  **Interactive Configuration UI:** Real-time TUI for configuring models, API keys, and settings—no manual file editing required.
+-  **Agentic Tools:** The LLM can autonomously execute commands (`run_command`), edit files (`read_file`, `write_file`, `search_files`), and search the internet (`web_search`).
+-  **Cloud & Local Inference:** Seamlessly switch between local GGUF models (via `llama-server`) and cloud APIs.
+-  **Zero-Config Subprocess Management:** Automatically launches, manages, and terminates `llama-server` in the background.
+-  **Multimodal Support:** Supports multimodal input. Paste images directly from your clipboard to auto-save them to the vault and embed them in your prompts.
+-  **Thinking Modes:** Quickly toggle between "Fast" mode for rapid responses and "Deep" mode to unlock the model's internal Chain-of-Thought reasoning.
+-  **Code Block Yanker:** Built-in clipboard manager. Easily extract and copy code blocks from the assistant's responses using a dedicated UI modal.
+-  **Butter-Smooth TUI:** Fast rendering with mouse scroll wheel support and intuitive shortcuts.
 
 ---
 
@@ -69,7 +69,7 @@ The Rust binary handles the terminal interface, memory system, tool execution, a
 ### 1. Clone and build
 
 ```bash
-git clone https://github.com/yourname/LeanLayerCLI
+git clone https://github.com/Harshalj2108/LeanLayerCLI
 cd LeanLayerCLI
 cargo build --release
 ```
