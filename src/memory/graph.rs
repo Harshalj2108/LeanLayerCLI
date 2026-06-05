@@ -19,6 +19,7 @@ pub enum NodeKind {
 
 pub struct MemoryGraph {
     pub nodes: HashMap<String, Node>,
+    pub vault_path: PathBuf,
 }
 
 impl MemoryGraph {
@@ -57,7 +58,7 @@ impl MemoryGraph {
             }
         }
 
-        Ok(Self { nodes })
+        Ok(Self { nodes, vault_path: vault_path.clone() })
     }
 
     /// Return the N most recent/relevant nodes for display
@@ -83,6 +84,93 @@ impl MemoryGraph {
         }
 
         result
+    }
+
+    /// Enhancement #2: Find concept nodes whose IDs appear as keywords in the user prompt
+    pub fn find_matching_concepts(&self, prompt: &str) -> Vec<&Node> {
+        let prompt_lower = prompt.to_lowercase();
+        let prompt_words: Vec<&str> = prompt_lower.split_whitespace().collect();
+
+        self.nodes.values()
+            .filter(|n| matches!(n.kind, NodeKind::Concept))
+            .filter(|n| {
+                let concept_lower = n.id.to_lowercase();
+                // Match if any concept word appears in prompt, or vice versa
+                let concept_parts: Vec<&str> = concept_lower.split('-').collect();
+                concept_parts.iter().any(|part| {
+                    part.len() >= 3 && prompt_words.iter().any(|w| w.contains(part))
+                }) || prompt_words.iter().any(|w| concept_lower.contains(w) && w.len() >= 3)
+            })
+            .collect()
+    }
+
+    /// Enhancement #2: Build RAG context string from matched concepts and their linked sessions
+    pub fn build_concept_context(&self, prompt: &str) -> String {
+        let matched = self.find_matching_concepts(prompt);
+        if matched.is_empty() {
+            return String::new();
+        }
+
+        let mut ctx = String::from("Relevant knowledge from your vault:\n\n");
+
+        for concept in &matched {
+            // Try to read concept file
+            let concept_path = self.vault_path
+                .join("concepts")
+                .join(format!("{}.md", concept.id));
+
+            if let Ok(content) = fs::read_to_string(&concept_path) {
+                ctx.push_str(&format!("## Concept: {}\n", concept.id));
+
+                // Extract summary lines (skip frontmatter)
+                let mut in_frontmatter = false;
+                for line in content.lines() {
+                    if line.trim() == "---" {
+                        in_frontmatter = !in_frontmatter;
+                        continue;
+                    }
+                    if !in_frontmatter {
+                        ctx.push_str(line);
+                        ctx.push('\n');
+                    }
+                }
+                ctx.push('\n');
+            }
+
+            // Load linked session summaries (limit to 3 most recent)
+            for session_id in concept.connections.iter().take(3) {
+                let session_path = self.vault_path
+                    .join("sessions")
+                    .join(format!("{}.md", session_id));
+
+                if let Ok(content) = fs::read_to_string(&session_path) {
+                    // Extract just the summary section
+                    let mut in_summary = false;
+                    let mut summary_lines = Vec::new();
+                    for line in content.lines() {
+                        if line.starts_with("## Summary") {
+                            in_summary = true;
+                            continue;
+                        }
+                        if in_summary {
+                            if line.starts_with("## ") {
+                                break;
+                            }
+                            summary_lines.push(line);
+                        }
+                    }
+                    if !summary_lines.is_empty() {
+                        ctx.push_str(&format!("  Related session {}: {}\n",
+                            session_id,
+                            summary_lines.join(" ").trim()
+                        ));
+                    }
+                }
+            }
+            ctx.push('\n');
+        }
+
+        ctx
     }
 }
 

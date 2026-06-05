@@ -1,0 +1,3 @@
+D:\llama\llama-server.exe -m "D:\Models\blobs\sha256-68b96ecfe202dcd3239b5b570ee9a131e5c6a22660d22552b1b291f1e08f314f" --port 8081 -ngl 20 --ctx-size 8192
+
+cargo run -- chat
