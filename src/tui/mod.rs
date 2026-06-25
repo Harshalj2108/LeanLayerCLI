@@ -4,7 +4,7 @@ pub mod graph;
 
 use anyhow::Result;
 use ratatui::crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, EnableBracketedPaste, DisableBracketedPaste, Event, KeyCode, KeyModifiers},
+    event::{self, EnableBracketedPaste, DisableBracketedPaste, EnableMouseCapture, DisableMouseCapture, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -24,8 +24,8 @@ pub async fn run(start_config: bool) -> Result<()> {
     execute!(
         stdout,
         EnterAlternateScreen,
-        EnableMouseCapture,
         EnableBracketedPaste,
+        EnableMouseCapture,
         ratatui::crossterm::terminal::DisableLineWrap,
     )?;
     let backend = CrosstermBackend::new(stdout);
@@ -134,8 +134,9 @@ pub async fn run(start_config: bool) -> Result<()> {
     execute!(
         terminal.backend_mut(),
         LeaveAlternateScreen,
+        DisableBracketedPaste,
         DisableMouseCapture,
-        DisableBracketedPaste
+        ratatui::crossterm::terminal::EnableLineWrap,
     )?;
     terminal.show_cursor()?;
 

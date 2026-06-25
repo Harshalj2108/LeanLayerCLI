@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},    prelude::Stylize,
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState, Clear},
 };
 
 
@@ -91,12 +91,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(format!("❯ {}", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ])));
 
-        // Content indented elegantly
-        let md_text = tui_markdown::from_str(&msg.content);
         let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
-        for line in md_text.lines {
-            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
-            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+        for line in msg.content.lines() {
+            let wrapped_lines = textwrap::wrap(line, wrap_width);
             if wrapped_lines.is_empty() {
                 items.push(ListItem::new(ratatui::text::Line::from("")));
             } else {
@@ -114,11 +111,9 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("❯ AI Assistant ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
             Span::styled("▊", Style::default().fg(MAUVE).add_modifier(Modifier::RAPID_BLINK)),
         ])));
-        let md_text = tui_markdown::from_str(&app.current_response);
         let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
-        for line in md_text.lines {
-            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
-            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+        for line in app.current_response.lines() {
+            let wrapped_lines = textwrap::wrap(line, wrap_width);
             if wrapped_lines.is_empty() {
                 items.push(ListItem::new(ratatui::text::Line::from("")));
             } else {
@@ -291,13 +286,11 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .constraints([Constraint::Min(0), Constraint::Length(1)])
                 .split(inner_area);
 
-            let md_text = tui_markdown::from_str(&content);
-            let total_lines = md_text.lines.len();
-            let scroll_pos = (*scroll).min(total_lines.saturating_sub(modal_layout[0].height as usize));
-            let converted_lines = md_text.lines.into_iter().map(|line| {
-                let spans = line.spans.into_iter().map(|s| Span::styled(s.content, ratatui::style::Style::default())).collect::<Vec<_>>();
-                ratatui::text::Line::from(spans)
+            let converted_lines = content.lines().map(|line| {
+                ratatui::text::Line::from(line.to_string())
             }).collect::<Vec<_>>();
+            let total_lines = converted_lines.len();
+            let scroll_pos = (*scroll).min(total_lines.saturating_sub(modal_layout[0].height as usize));
             let paragraph = Paragraph::new(converted_lines).wrap(Wrap { trim: false }).scroll((scroll_pos as u16, 0));
             f.render_widget(paragraph, modal_layout[0]);
 
@@ -443,6 +436,96 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 Span::raw(" Cancel"),
             ]);
             f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::ModelSelection { models, selected_index, scroll } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut items = Vec::new();
+            for (i, (provider, model)) in models.iter().enumerate() {
+                let is_active = *selected_index == i;
+                let marker = if is_active { "❯ " } else { "  " };
+                let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
+                items.push(ListItem::new(format!("{}{:<15} {}", marker, format!("[{}]", provider), model)).style(style));
+            }
+
+            let list = List::new(items)
+                .block(Block::default().title(Span::styled(" Select Global Model ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD))).borders(Borders::BOTTOM))
+                .highlight_symbol("")
+                .highlight_style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
+            f.render_widget(list, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN)),
+                Span::raw(" Select Model  "),
+                Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Cancel"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::ProviderSelection { providers, selected_index } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut items = Vec::new();
+            for (i, provider) in providers.iter().enumerate() {
+                let is_active = *selected_index == i;
+                let marker = if is_active { "❯ " } else { "  " };
+                let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
+                items.push(ListItem::new(format!("{}{}", marker, provider)).style(style));
+            }
+
+            let list = List::new(items)
+                .block(Block::default().title(Span::styled(" Select Provider ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD))).borders(Borders::BOTTOM))
+                .highlight_symbol("")
+                .highlight_style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
+            f.render_widget(list, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN)),
+                Span::raw(" Select Provider  "),
+                Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Cancel"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::CommandAutocomplete { commands, selected_index } => {
+            // Draw a smaller popup centered slightly above the bottom
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(60), Constraint::Length(commands.len() as u16 + 2), Constraint::Length(3)])
+                .split(area);
+            
+            let h_layout = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(20), Constraint::Percentage(60), Constraint::Percentage(20)])
+                .split(layout[1]);
+            
+            let popup_area = h_layout[1];
+            
+            f.render_widget(Clear, popup_area);
+            f.render_widget(Block::default().borders(Borders::ALL).border_style(Style::default().fg(GREEN)).bg(MANTLE), popup_area);
+
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+
+            let mut items = Vec::new();
+            for (i, cmd) in commands.iter().enumerate() {
+                let is_active = *selected_index == i;
+                let marker = if is_active { "❯ " } else { "  " };
+                let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD).bg(SURFACE0) } else { Style::default().fg(TEXT) };
+                items.push(ListItem::new(format!("{}{}", marker, cmd)).style(style));
+            }
+
+            let list = List::new(items)
+                .highlight_symbol("")
+                .highlight_style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
+            f.render_widget(list, inner_area);
         }
         super::app::ModalState::WorkspacePanel { files, selected_index, scroll } => {
             let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });

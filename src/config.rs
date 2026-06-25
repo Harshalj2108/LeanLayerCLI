@@ -24,9 +24,12 @@ pub struct Config {
     /// Backend provider: "local", "openai", "gemini", "anthropic", "openrouter", "nvidia"
     #[serde(default = "default_api_provider")]
     pub api_provider: String,
-    /// API key for cloud providers (can also use env vars: OPENAI_API_KEY, GEMINI_API_KEY, etc.)
+    /// API key for cloud providers (deprecated, use api_keys)
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Multi-provider API keys
+    #[serde(default)]
+    pub api_keys: std::collections::HashMap<String, String>,
     /// Model name for cloud APIs (e.g. "gpt-4o", "gemini-2.5-flash", "claude-sonnet-4-20250514")
     #[serde(default)]
     pub api_model: Option<String>,
@@ -39,6 +42,19 @@ pub struct Config {
     pub trust_level: String,
     #[serde(default = "default_max_agent_iterations")]
     pub max_agent_iterations: usize,
+    
+    // MCP (Model Context Protocol) Support
+    #[serde(default)]
+    pub mcp_servers: std::collections::HashMap<String, McpServerConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct McpServerConfig {
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: std::collections::HashMap<String, String>,
 }
 
 fn default_gpu_layers() -> i32 { 99 }
@@ -65,10 +81,12 @@ impl Default for Config {
             port: default_port(),
             api_provider: default_api_provider(),
             api_key: None,
+            api_keys: std::collections::HashMap::new(),
             api_model: None,
             search_api_key: None,
             trust_level: default_trust_level(),
             max_agent_iterations: default_max_agent_iterations(),
+            mcp_servers: std::collections::HashMap::new(),
         }
     }
 }
@@ -92,7 +110,16 @@ pub fn load() -> Result<Config> {
     let path = config_path();
     if path.exists() {
         let contents = std::fs::read_to_string(&path)?;
-        Ok(toml::from_str(&contents)?)
+        let mut cfg: Config = toml::from_str(&contents)?;
+        
+        // Migrate legacy api_key
+        if let Some(old_key) = cfg.api_key.take() {
+            if !old_key.is_empty() && !cfg.api_keys.contains_key(&cfg.api_provider) {
+                cfg.api_keys.insert(cfg.api_provider.clone(), old_key);
+                let _ = save(&cfg);
+            }
+        }
+        Ok(cfg)
     } else {
         // Write defaults on first run
         let cfg = Config::default();
@@ -117,9 +144,9 @@ pub fn print_config_path() {
     println!("{}", config_path().display());
 }
 
-/// Resolve API key: check config first, then environment variable
+/// Resolve API key: check api_keys map first, then environment variable
 pub fn resolve_api_key(cfg: &Config) -> Option<String> {
-    if let Some(key) = &cfg.api_key {
+    if let Some(key) = cfg.api_keys.get(&cfg.api_provider) {
         if !key.is_empty() {
             return Some(key.clone());
         }

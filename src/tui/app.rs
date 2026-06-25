@@ -64,6 +64,19 @@ pub enum ModalState {
         diff: String,
         proposed_content: String,
     },
+    ModelSelection {
+        models: Vec<(String, String)>, // (Provider, Model)
+        selected_index: usize,
+        scroll: usize,
+    },
+    ProviderSelection {
+        providers: Vec<String>,
+        selected_index: usize,
+    },
+    CommandAutocomplete {
+        commands: Vec<String>,
+        selected_index: usize,
+    },
 }
 
 pub struct App<'a> {
@@ -89,8 +102,12 @@ pub struct App<'a> {
     pub rate_max: u32,
     pub agent_iteration_count: usize,
     pub token_count: usize,
+    pub history_token_count: usize,
     bpe: Option<tiktoken_rs::CoreBPE>,
     clipboard: Option<Clipboard>,
+    pub backend_task: Option<JoinHandle<()>>,
+    pub pinned_files: std::collections::HashSet<String>,
+    pub role: AgentRole,
 }
 
 impl<'a> App<'a> {
@@ -101,8 +118,22 @@ impl<'a> App<'a> {
 
         let mut messages = Vec::new();
 
+        let mut mcp_clients = std::collections::HashMap::new();
+        let mut mcp_tools = Vec::new();
+
+        for (name, server_cfg) in &cfg.mcp_servers {
+            if let Ok(client) = crate::agent::mcp::McpClient::spawn(name, server_cfg).await {
+                if let Ok(tools) = client.list_tools().await {
+                    for t in tools {
+                        mcp_tools.push((name.clone(), t));
+                    }
+                }
+                mcp_clients.insert(name.clone(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
+            }
+        }
+
         // Inject tool-calling system prompt
-        let tool_prompt = crate::agent::tools::build_tool_system_prompt();
+        let tool_prompt = crate::agent::tools::build_tool_system_prompt(crate::tui::app::AgentRole::Chat);
         messages.push(ChatMessage {
             role: "system".into(),
             content: tool_prompt,
@@ -122,7 +153,7 @@ impl<'a> App<'a> {
         input.set_cursor_line_style(ratatui::style::Style::default());
         input.set_placeholder_text(" Type your message here... (Enter to submit, Shift+Enter for newline, Ctrl+V to paste)");
 
-        Ok(Self {
+        let mut app = Self {
             cfg,
             messages,
             input,
@@ -145,8 +176,12 @@ impl<'a> App<'a> {
             rate_max: 40,
             agent_iteration_count: 0,
             token_count: 0,
+            history_token_count: 0,
             bpe: tiktoken_rs::cl100k_base().ok(),
             clipboard: Clipboard::new().ok(),
+            backend_task: None,
+            pinned_files: std::collections::HashSet::new(),
+            role: AgentRole::Chat,
         })
     }
 
@@ -157,8 +192,18 @@ impl<'a> App<'a> {
         };
     }
 
-    pub fn toggle_thinking_mode(&mut self) {
-        self.thinking_mode = !self.thinking_mode;
+    pub fn cycle_mode(&mut self) {
+        self.mode = self.mode.cycle();
+    }
+
+    pub fn cycle_role(&mut self) {
+        self.role = self.role.cycle();
+        self.status = format!("Agent role: {}", self.role.label().trim());
+
+        let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role);
+        if let Some(sys) = self.messages.iter_mut().find(|m| m.role == "system") {
+            sys.content = new_prompt;
+        }
     }
 
     pub async fn update_rate_info(&mut self) {
@@ -202,6 +247,7 @@ impl<'a> App<'a> {
 
     pub async fn tick(&mut self) {
         let mut needs_token_update = false;
+        let mut needs_history_recalc = false;
         if let Some(rx) = &mut self.token_rx {
             loop {
                 match rx.try_recv() {
@@ -215,6 +261,7 @@ impl<'a> App<'a> {
                             content: self.current_response.clone(),
                             images: None,
                         });
+                        needs_history_recalc = true;
                         
                         let tool_calls = crate::agent::tools::parse_tool_calls(&self.current_response);
                         if !tool_calls.is_empty() {
@@ -240,6 +287,9 @@ impl<'a> App<'a> {
                                     }
                                     crate::agent::tools::ToolCall::WebSearch { query } => {
                                         crate::agent::executor::execute_web_search(query).await
+                                    }
+                                    crate::agent::tools::ToolCall::ScrapeUrl { url } => {
+                                        crate::agent::executor::execute_web_scrape(url).await
                                     }
                                 };
                                 
@@ -303,12 +353,21 @@ impl<'a> App<'a> {
                         break;
                     }
                     Ok(BackendMessage::Error { message }) => {
+                        if !self.current_response.is_empty() {
+                            self.messages.push(ChatMessage {
+                                role: "assistant".into(),
+                                content: self.current_response.clone(),
+                                images: None,
+                            });
+                            self.current_response.clear();
+                        }
                         self.messages.push(ChatMessage {
                             role: "assistant".into(),
                             content: format!("⚠️ **API Error**:\n\n{}", message),
                             images: None,
                         });
-                        self.status = "API Error".into();
+                        needs_history_recalc = true;
+                        self.is_generating = false;
                         self.status = "Ready".into();
                         self.token_rx = None;
                         break;
@@ -322,6 +381,9 @@ impl<'a> App<'a> {
                     }
                 }
             }
+        }
+        if needs_history_recalc {
+            self.recalculate_history_tokens();
         }
         if needs_token_update {
             self.update_token_count();
@@ -342,6 +404,118 @@ impl<'a> App<'a> {
     pub async fn handle_key(&mut self, key: KeyEvent) -> Result<()> {
         if let Some(modal) = self.active_modal.clone() {
             match modal {
+                ModalState::ModelSelection { models, mut selected_index, mut scroll } => {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.active_modal = None;
+                            self.status = "Ready".into();
+                        }
+                        KeyCode::Up => {
+                            selected_index = selected_index.saturating_sub(1);
+                            if selected_index < scroll { scroll = selected_index; }
+                            self.active_modal = Some(ModalState::ModelSelection { models, selected_index, scroll });
+                        }
+                        KeyCode::Down => {
+                            if selected_index + 1 < models.len() {
+                                selected_index += 1;
+                                if selected_index >= scroll + 10 { scroll = selected_index - 9; }
+                                self.active_modal = Some(ModalState::ModelSelection { models, selected_index, scroll });
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let (provider, model) = models[selected_index].clone();
+                            self.cfg.api_provider = provider.clone();
+                            self.cfg.api_model = Some(model.clone());
+                            let _ = crate::config::save(&self.cfg);
+                            if let Err(e) = self.reload_backend() {
+                                self.status = format!("Switched to {}, but: {}", provider, e);
+                            } else {
+                                self.status = format!("Switched to {} on {}", model, provider);
+                            }
+                            self.active_modal = None;
+                        }
+                        _ => {}
+                    }
+                }
+                ModalState::ProviderSelection { providers, mut selected_index } => {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.active_modal = None;
+                        }
+                        KeyCode::Up => {
+                            selected_index = selected_index.saturating_sub(1);
+                            self.active_modal = Some(ModalState::ProviderSelection { providers, selected_index });
+                        }
+                        KeyCode::Down => {
+                            if selected_index + 1 < providers.len() {
+                                selected_index += 1;
+                                self.active_modal = Some(ModalState::ProviderSelection { providers, selected_index });
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let provider = providers[selected_index].clone();
+                            self.cfg.api_provider = provider.clone();
+                            let _ = crate::config::save(&self.cfg);
+                            if let Err(e) = self.reload_backend() {
+                                self.status = format!("Provider set to {}, but: {}", provider, e);
+                            } else {
+                                self.status = format!("Provider set to {}", provider);
+                            }
+                            
+                            // Automatically open input for API key entry
+                            self.input = tui_textarea::TextArea::default();
+                            self.input.insert_str(format!("/api_key "));
+                            self.active_modal = None;
+                        }
+                        _ => {}
+                    }
+                }
+                ModalState::CommandAutocomplete { commands, mut selected_index } => {
+                    match key.code {
+                        KeyCode::Esc => {
+                            self.active_modal = None;
+                        }
+                        KeyCode::Up => {
+                            selected_index = selected_index.saturating_sub(1);
+                            self.active_modal = Some(ModalState::CommandAutocomplete { commands, selected_index });
+                        }
+                        KeyCode::Down => {
+                            if selected_index + 1 < commands.len() {
+                                selected_index += 1;
+                                self.active_modal = Some(ModalState::CommandAutocomplete { commands, selected_index });
+                            }
+                        }
+                        KeyCode::Enter => {
+                            let cmd = commands[selected_index].clone();
+                            self.active_modal = None;
+                            self.input = tui_textarea::TextArea::default();
+                            self.handle_slash_command(&cmd).await?;
+                        }
+                        _ => {
+                            self.input.input(key);
+                            let content = self.input.lines().join("\n");
+                            if !content.starts_with('/') {
+                                self.active_modal = None;
+                            } else {
+                                // Filter commands based on input
+                                let all_cmds = vec!["/provider", "/model", "/api_key", "/trust", "/mcp add", "/mcp remove", "/config"];
+                                let filtered: Vec<String> = all_cmds.into_iter()
+                                    .filter(|c| c.starts_with(&content))
+                                    .map(|s| s.to_string())
+                                    .collect();
+                                if filtered.is_empty() {
+                                    self.active_modal = None;
+                                } else {
+                                    self.active_modal = Some(ModalState::CommandAutocomplete {
+                                        commands: filtered,
+                                        selected_index: 0,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    return Ok(()); // Handled input inside CommandAutocomplete
+                }
                 ModalState::SessionViewer { title, content, mut scroll, node_id, is_session } => {
                     match key.code {
                         KeyCode::Esc | KeyCode::Char('q') => {
@@ -417,6 +591,10 @@ impl<'a> App<'a> {
                                 crate::agent::tools::ToolCall::WebSearch { query } => {
                                     self.status = format!("Searching the web: {}...", query);
                                     crate::agent::executor::execute_web_search(query).await
+                                }
+                                crate::agent::tools::ToolCall::ScrapeUrl { url } => {
+                                    self.status = format!("Scraping URL: {}...", url);
+                                    crate::agent::executor::execute_web_scrape(url).await
                                 }
                             };
                             
@@ -744,7 +922,7 @@ impl<'a> App<'a> {
         match self.focus {
             Focus::Chat => {
                 if key.code == KeyCode::Enter && key.modifiers.is_empty() {
-                    self.submit()?;
+                    self.submit().await?;
                 } else if key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::SHIFT) {
                     self.input.insert_newline();
                 } else if (key.code == KeyCode::Char('v') || key.code == KeyCode::Char('V'))
@@ -784,6 +962,20 @@ impl<'a> App<'a> {
                     self.scroll = self.scroll.saturating_sub(1);
                 } else {
                     self.input.input(key);
+                    let content = self.input.lines().join("\n");
+                    if content.starts_with('/') {
+                        let all_cmds = vec!["/provider", "/model", "/api_key", "/trust", "/mcp add", "/mcp remove", "/config"];
+                        let filtered: Vec<String> = all_cmds.into_iter()
+                            .filter(|c| c.starts_with(&content))
+                            .map(|s| s.to_string())
+                            .collect();
+                        if !filtered.is_empty() {
+                            self.active_modal = Some(ModalState::CommandAutocomplete {
+                                commands: filtered,
+                                selected_index: 0,
+                            });
+                        }
+                    }
                 }
             },
             Focus::Graph => match key.code {
@@ -928,13 +1120,19 @@ impl<'a> App<'a> {
         Ok(())
     }
 
-    fn submit(&mut self) -> Result<()> {
+    async fn submit(&mut self) -> Result<()> {
         let content = self.input.lines().join("\n").trim().to_string();
         if content.is_empty() || self.is_generating {
             return Ok(());
         }
 
-        let mut new_input = TextArea::default();
+        if content.starts_with('/') {
+            self.input = tui_textarea::TextArea::default();
+            self.handle_slash_command(&content).await?;
+            return Ok(());
+        }
+
+        let mut new_input = tui_textarea::TextArea::default();
         new_input.set_cursor_line_style(ratatui::style::Style::default());
         new_input.set_placeholder_text(" Type your message here... (Enter to submit, Shift+Enter for newline, Ctrl+V to paste)");
         self.input = new_input;
@@ -963,21 +1161,194 @@ impl<'a> App<'a> {
             images,
         });
 
+        self.recalculate_history_tokens();
         self.agent_iteration_count = 0;
         self.update_token_count();
         self.trigger_backend()
     }
 
-    pub fn update_token_count(&mut self) {
+    pub fn recalculate_history_tokens(&mut self) {
         if let Some(bpe) = &self.bpe {
             let mut text = String::new();
             for msg in &self.messages {
                 text.push_str(&msg.content);
                 text.push('\n');
             }
-            text.push_str(&self.current_response);
-            self.token_count = bpe.encode_ordinary(&text).len();
+            self.history_token_count = bpe.encode_ordinary(&text).len();
+            self.token_count = self.history_token_count;
         }
+    }
+
+    pub fn update_token_count(&mut self) {
+        if let Some(bpe) = &self.bpe {
+            let current_len = if !self.current_response.is_empty() {
+                bpe.encode_ordinary(&self.current_response).len()
+            } else {
+                0
+            };
+            self.token_count = self.history_token_count + current_len;
+        }
+    }
+
+    pub fn reload_backend(&mut self) -> Result<()> {
+        let new_backend = crate::backend::process::Backend::spawn(&self.cfg)?;
+        self.rate_limiter = new_backend.get_rate_limiter();
+        self.backend = new_backend;
+        Ok(())
+    }
+
+    pub async fn handle_slash_command(&mut self, cmd: &str) -> Result<()> {
+        let parts: Vec<&str> = cmd.split_whitespace().collect();
+        if parts.is_empty() { return Ok(()); }
+        
+        match parts[0] {
+            "/provider" => {
+                let providers = vec![
+                    "openai".to_string(),
+                    "gemini".to_string(),
+                    "anthropic".to_string(),
+                    "openrouter".to_string(),
+                    "nvidia".to_string(),
+                    "local".to_string(),
+                ];
+                self.active_modal = Some(ModalState::ProviderSelection {
+                    providers,
+                    selected_index: 0,
+                });
+                self.status = "Select a provider (Up/Down, Enter to choose)".into();
+            }
+            "/model" => {
+                let mut models: Vec<(String, String)> = Vec::new();
+                let provider = self.cfg.api_provider.as_str();
+                
+                match provider {
+                    "openai" => {
+                        for m in ["gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo", "gpt-4o-mini", "o1-mini", "o1-preview", "o3-mini"] {
+                            models.push(("openai".into(), m.into()));
+                        }
+                    }
+                    "gemini" => {
+                        for m in ["gemini-1.5-pro", "gemini-1.5-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.0-pro-exp"] {
+                            models.push(("gemini".into(), m.into()));
+                        }
+                    }
+                    "anthropic" => {
+                        for m in ["claude-3-5-sonnet-20241022", "claude-3-5-sonnet-20240620", "claude-3-opus-20240229", "claude-3-haiku-20240307", "claude-3-5-haiku-20241022"] {
+                            models.push(("anthropic".into(), m.into()));
+                        }
+                    }
+                    "nvidia" => {
+                        for m in [
+                            "meta/llama-3.3-70b-instruct", "meta/llama-3.1-70b-instruct", "meta/llama-3.1-8b-instruct",
+                            "nvidia/llama-3.1-nemotron-70b-instruct", "nvidia/llama-3.1-nemotron-51b-instruct",
+                            "nv-mistralai/mistral-nemo-12b-instruct", "mistralai/mixtral-8x22b-v0.1", "mistralai/mistral-large-2-instruct",
+                            "microsoft/phi-3.5-moe-instruct"
+                        ] {
+                            models.push(("nvidia".into(), m.into()));
+                        }
+                    }
+                    "openrouter" => {
+                        for m in [
+                            "anthropic/claude-3.5-sonnet", "openai/gpt-4o", "google/gemini-1.5-pro", 
+                            "meta-llama/llama-3.1-405b-instruct", "meta-llama/llama-3.1-70b-instruct", 
+                            "cohere/command-r-plus", "mistralai/mistral-large-2"
+                        ] {
+                            models.push(("openrouter".into(), m.into()));
+                        }
+                    }
+                    _ => {
+                        self.status = format!("No default models mapped for provider '{}'.", provider);
+                        return Ok(());
+                    }
+                }
+                
+                self.active_modal = Some(ModalState::ModelSelection {
+                    models,
+                    selected_index: 0,
+                    scroll: 0,
+                });
+                self.status = format!("Select model for {} (Up/Down, Enter to choose)", provider);
+            }
+            "/api_key" => {
+                if parts.len() > 1 {
+                    let key = parts[1].to_string();
+                    self.cfg.api_keys.insert(self.cfg.api_provider.clone(), key);
+                    let _ = crate::config::save(&self.cfg);
+                    if let Err(e) = self.reload_backend() {
+                        self.status = format!("API key saved, but backend failed: {}", e);
+                    } else {
+                        self.status = format!("API key updated and saved for provider '{}'.", self.cfg.api_provider);
+                    }
+                } else {
+                    self.status = "Usage: /api_key <key>".into();
+                }
+            }
+            "/trust" => {
+                if parts.len() > 1 {
+                    self.cfg.trust_level = parts[1].to_string();
+                    crate::config::save(&self.cfg)?;
+                    self.status = format!("Trust level set to {}", parts[1]);
+                }
+            }
+            "/mcp" => {
+                if parts.len() >= 4 && parts[1] == "add" {
+                    let name = parts[2].to_string();
+                    let command = parts[3].to_string();
+                    let args = parts[4..].iter().map(|s| s.to_string()).collect();
+                    
+                    let server_cfg = crate::config::McpServerConfig {
+                        command,
+                        args,
+                        env: std::collections::HashMap::new(),
+                    };
+                    self.cfg.mcp_servers.insert(name.clone(), server_cfg.clone());
+                    crate::config::save(&self.cfg)?;
+                    
+                    if let Ok(client) = crate::agent::mcp::McpClient::spawn(&name, &server_cfg).await {
+                        if let Ok(tools) = client.list_tools().await {
+                            for t in tools {
+                                self.mcp_tools.push((name.clone(), t));
+                            }
+                        }
+                        self.mcp_clients.insert(name.clone(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
+                        
+                        let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role, &self.mcp_tools);
+                        if let Some(sys) = self.messages.iter_mut().find(|m| m.role == "system") {
+                            sys.content = new_prompt;
+                        }
+                        self.status = format!("Added MCP server '{}'", name);
+                    } else {
+                        self.status = format!("Failed to connect to MCP server '{}'", name);
+                    }
+                } else if parts.len() >= 3 && parts[1] == "remove" {
+                    let name = parts[2];
+                    self.cfg.mcp_servers.remove(name);
+                    crate::config::save(&self.cfg)?;
+                    self.mcp_clients.remove(name);
+                    self.mcp_tools.retain(|(s, _)| s != name);
+                    let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role, &self.mcp_tools);
+                    if let Some(sys) = self.messages.iter_mut().find(|m| m.role == "system") {
+                        sys.content = new_prompt;
+                    }
+                    self.status = format!("Removed MCP server '{}'", name);
+                } else {
+                    self.status = "Usage: /mcp add <name> <cmd> [args...] OR /mcp remove <name>".into();
+                }
+            }
+            "/config" => {
+                let toml_str = toml::to_string_pretty(&self.cfg).unwrap_or_else(|_| "Error".into());
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: format!("**Current Configuration**:\n```toml\n{}\n```", toml_str),
+                    images: None,
+                });
+                self.scroll = 0;
+            }
+            _ => {
+                self.status = format!("Unknown command: {}", parts[0]);
+            }
+        }
+        Ok(())
     }
 
     pub fn trigger_backend(&mut self) -> Result<()> {
