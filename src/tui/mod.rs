@@ -86,9 +86,9 @@ pub async fn run(start_config: bool) -> Result<()> {
                                 app.quit().await?;
                                 break;
                             }
-                            // Enhancement #7: Modifier-gated mode toggle (Ctrl+M)
+                            // Mode cycle: Low → High → Ultra → Low (Ctrl+M)
                             (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
-                                app.toggle_thinking_mode();
+                                app.cycle_mode();
                             }
                             // Enhancement #4: Interactive Config Settings UI (Ctrl+E)
                             (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
