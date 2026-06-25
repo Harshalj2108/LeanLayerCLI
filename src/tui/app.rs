@@ -22,6 +22,43 @@ pub enum Focus {
     Graph,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AppMode {
+    Low,
+    High,
+    Ultra,
+}
+
+impl AppMode {
+    pub fn cycle(self) -> Self {
+        match self {
+            AppMode::Low => AppMode::High,
+            AppMode::High => AppMode::Ultra,
+            AppMode::Ultra => AppMode::Low,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AppMode::Low => " LOW ",
+            AppMode::High => " HIGH ",
+            AppMode::Ultra => " ULTRA ",
+        }
+    }
+
+    pub fn temperature(self) -> f32 {
+        match self {
+            AppMode::Low => 0.3,
+            AppMode::High => 0.6,
+            AppMode::Ultra => 0.8,
+        }
+    }
+
+    pub fn thinking_enabled(self) -> bool {
+        matches!(self, AppMode::Ultra)
+    }
+}
+
 #[derive(Clone)]
 pub enum ModalState {
     SessionViewer {
@@ -76,7 +113,7 @@ pub struct App<'a> {
     pub status: String,
     pub should_quit: bool,
     pub graph: MemoryGraph,
-    pub thinking_mode: bool,
+    pub mode: AppMode,
     pub backend: Backend,
     pub scroll: usize,
     pub graph_scroll: usize,
@@ -132,7 +169,7 @@ impl<'a> App<'a> {
             status: "Ready".into(),
             should_quit: false,
             graph,
-            thinking_mode: false,
+            mode: AppMode::High,
             backend,
             scroll: 0,
             graph_scroll: 0,
@@ -157,8 +194,8 @@ impl<'a> App<'a> {
         };
     }
 
-    pub fn toggle_thinking_mode(&mut self) {
-        self.thinking_mode = !self.thinking_mode;
+    pub fn cycle_mode(&mut self) {
+        self.mode = self.mode.cycle();
     }
 
     pub async fn update_rate_info(&mut self) {
@@ -988,7 +1025,7 @@ impl<'a> App<'a> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.token_rx = Some(rx);
 
-        self.backend.send_generate(self.messages.clone(), tx, self.thinking_mode);
+        self.backend.send_generate(self.messages.clone(), tx, self.mode);
 
         Ok(())
     }

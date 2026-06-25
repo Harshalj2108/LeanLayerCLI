@@ -8,6 +8,7 @@ use futures_util::StreamExt;
 use super::protocol::{BackendMessage, ChatMessage};
 use super::ratelimit::RateLimiterHandle;
 use crate::config::Config;
+use crate::tui::app::AppMode;
 
 pub struct Backend {
     pub base_url: String,
@@ -259,13 +260,13 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        thinking: bool,
+        mode: AppMode,
     ) {
         match self.api_provider.as_str() {
-            "local" => self.send_local(messages, tx, thinking),
-            "openai" | "openrouter" | "nvidia" => self.send_openai_compat(messages, tx, thinking),
-            "gemini" => self.send_gemini(messages, tx, thinking),
-            "anthropic" => self.send_anthropic(messages, tx, thinking),
+            "local" => self.send_local(messages, tx, mode),
+            "openai" | "openrouter" | "nvidia" => self.send_openai_compat(messages, tx, mode),
+            "gemini" => self.send_gemini(messages, tx, mode),
+            "anthropic" => self.send_anthropic(messages, tx, mode),
             _ => {
                 tx.send(BackendMessage::Error {
                     message: format!("Unknown API provider: {}", self.api_provider),
@@ -278,13 +279,15 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        thinking: bool,
+        mode: AppMode,
     ) {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let serialized_messages = serialize_messages_openai(&messages);
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let temperature = mode.temperature();
+        let thinking = mode.thinking_enabled();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("local").await;
 
@@ -292,7 +295,7 @@ impl Backend {
                 "model": "local",
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": if thinking { 0.7 } else { 0.6 },
+                "temperature": temperature,
                 "top_p": 0.95,
                 "chat_template_kwargs": {
                     "enable_thinking": thinking
@@ -307,7 +310,7 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        thinking: bool,
+        mode: AppMode,
     ) {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let model = self.api_model.clone().unwrap_or_else(|| "gpt-4o".into());
@@ -317,6 +320,7 @@ impl Backend {
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider = self.api_provider.clone();
+        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait(&provider).await;
 
@@ -324,7 +328,7 @@ impl Backend {
                 "model": model,
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": if thinking { 0.7 } else { 0.6 },
+                "temperature": temperature,
             });
 
             let api_key_ref = api_key.as_deref();
@@ -336,7 +340,7 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        thinking: bool,
+        mode: AppMode,
     ) {
         let model = self.api_model.clone().unwrap_or_else(|| "gemini-2.5-flash".into());
         let api_key = self.api_key.clone();
@@ -344,6 +348,7 @@ impl Backend {
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("gemini").await;
 
@@ -353,7 +358,7 @@ impl Backend {
                 "model": model,
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": if thinking { 0.7 } else { 0.6 },
+                "temperature": temperature,
             });
 
             stream_openai_response(&client, url, body, api_key.as_deref(), tx).await;
@@ -364,7 +369,7 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        thinking: bool,
+        mode: AppMode,
     ) {
         let model = self.api_model.clone().unwrap_or_else(|| "claude-sonnet-4-20250514".into());
         let api_key = self.api_key.clone().unwrap_or_default();
@@ -421,6 +426,7 @@ impl Backend {
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
+        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("anthropic").await;
 
@@ -429,7 +435,7 @@ impl Backend {
                 "messages": anthropic_messages,
                 "stream": true,
                 "max_tokens": 8192,
-                "temperature": if thinking { 0.7 } else { 0.6 },
+                "temperature": temperature,
             });
             if !system_text.is_empty() {
                 body["system"] = serde_json::json!(system_text);

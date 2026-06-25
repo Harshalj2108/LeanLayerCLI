@@ -218,10 +218,10 @@ fn draw_input(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let (mode_str, mode_color_bg, mode_color_fg) = if app.thinking_mode {
-        (" DEEP ENGINE ", BASE, SAPPHIRE)
-    } else {
-        (" FAST ENGINE ", BASE, YELLOW)
+    let (mode_str, mode_color_bg, mode_color_fg) = match app.mode {
+        super::app::AppMode::Low => (app.mode.label(), BASE, GREEN),
+        super::app::AppMode::High => (app.mode.label(), BASE, YELLOW),
+        super::app::AppMode::Ultra => (app.mode.label(), BASE, MAUVE),
     };
 
     let rpm_pct = if app.rate_max > 0 { app.rate_rpm as f32 / app.rate_max as f32 } else { 0.0 };
