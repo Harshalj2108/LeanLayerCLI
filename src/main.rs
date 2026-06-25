@@ -1,3 +1,4 @@
+mod agent;
 mod backend;
 mod config;
 mod memory;
@@ -19,8 +20,11 @@ enum Command {
     Chat,
     /// List past sessions
     Sessions,
-    /// Show config path
-    Config,
+    /// Manage configuration
+    Config {
+        #[arg(long, help = "Open interactive configuration editor")]
+        edit: bool,
+    },
 }
 
 #[tokio::main]
@@ -28,9 +32,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command.unwrap_or(Command::Chat) {
-        Command::Chat => tui::run().await?,
+        Command::Chat => tui::run(false).await?,
         Command::Sessions => memory::list_sessions()?,
-        Command::Config => config::print_config_path(),
+        Command::Config { edit } => {
+            if edit {
+                tui::run(true).await?;
+            } else {
+                config::print_config_path();
+            }
+        }
     }
 
     Ok(())

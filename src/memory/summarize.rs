@@ -1,4 +1,3 @@
-use ureq;
 use anyhow::Result;
 use crate::backend::protocol::ChatMessage;
 
@@ -8,8 +7,8 @@ pub struct SessionSummary {
     pub related: Vec<String>,
 }
 
-pub fn summarize_session(_backend: &mut crate::backend::process::Backend, history: &[ChatMessage]) -> Result<SessionSummary> {
-    let transcript = history
+pub async fn summarize_session(history: &[ChatMessage]) -> Result<SessionSummary> {
+    let transcript: String = history
         .iter()
         .map(|m| format!("{}: {}", m.role, m.content))
         .collect::<Vec<_>>()
@@ -22,11 +21,8 @@ pub fn summarize_session(_backend: &mut crate::backend::process::Backend, histor
   "concepts": ["concept1", "concept2"],
   "related": ["topic1", "topic2"]
 }}
-
-Conversation:
-{}"#,
-        transcript
-    );
+Transcript:
+{}"#, transcript);
 
     let body = serde_json::json!({
         "model": "local",
@@ -35,11 +31,14 @@ Conversation:
         "temperature": 0.3,
     });
 
-    let resp = ureq::post("http://127.0.0.1:8081/v1/chat/completions")
-        .set("Content-Type", "application/json")
-        .send_string(&body.to_string())?;
+    let client = reqwest::Client::new();
+    let resp = client.post("http://127.0.0.1:8081/v1/chat/completions")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await?;
 
-    let json: serde_json::Value = resp.into_json()?;
+    let json: serde_json::Value = resp.json().await?;
     let text = json["choices"][0]["message"]["content"]
         .as_str()
         .unwrap_or("")

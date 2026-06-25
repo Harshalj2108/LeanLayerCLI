@@ -3,8 +3,8 @@ use ratatui::style::{Color, Style, Modifier};
 
 use crate::memory::graph::{MemoryGraph, NodeKind};
 
-/// Render a simple ASCII graph of recent memory nodes
-pub fn render_graph<'a>(graph: &'a MemoryGraph, _width: usize, _height: usize) -> Text<'a> {
+/// Render a simple ASCII graph of recent memory nodes with selection highlighting
+pub fn render_graph<'a>(graph: &'a MemoryGraph, selected_index: Option<usize>, _width: usize, _height: usize) -> Text<'a> {
     let nodes = graph.recent_nodes(8);
 
     if nodes.is_empty() {
@@ -40,11 +40,19 @@ pub fn render_graph<'a>(graph: &'a MemoryGraph, _width: usize, _height: usize) -
             node.label.clone()
         };
 
+        let is_selected = selected_index == Some(i);
+        let prefix = if is_selected { "▶ " } else { "  " };
+        let label_style = if is_selected {
+            Style::default().fg(color).add_modifier(Modifier::BOLD).bg(Color::Rgb(49, 50, 68))
+        } else {
+            Style::default().fg(color)
+        };
+
         lines.push(Line::from(vec![
-            Span::raw("  "),
+            Span::styled(prefix, Style::default().fg(Color::Rgb(249, 226, 175)).add_modifier(Modifier::BOLD)),
             Span::styled(icon, Style::default().fg(color).add_modifier(Modifier::BOLD)),
             Span::raw(" "),
-            Span::styled(label, Style::default().fg(color)),
+            Span::styled(label, label_style),
         ]));
 
         // Show connections for this node (indented)
