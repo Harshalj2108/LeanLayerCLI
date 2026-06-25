@@ -224,6 +224,12 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         super::app::AppMode::Ultra => (app.mode.label(), BASE, MAUVE),
     };
 
+    let (role_str, role_color) = match app.role {
+        super::app::AgentRole::Chat => (app.role.label(), SAPPHIRE),
+        super::app::AgentRole::Plan => (app.role.label(), MAUVE),
+        super::app::AgentRole::Build => (app.role.label(), BLUE),
+    };
+
     let rpm_pct = if app.rate_max > 0 { app.rate_rpm as f32 / app.rate_max as f32 } else { 0.0 };
     let (rpm_color, rpm_label) = if rpm_pct >= 0.9 {
         (RED, "RPM")
@@ -253,6 +259,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" AIRLLM ", Style::default().fg(CRUST).bg(BLUE).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{}", mode_str), Style::default().fg(mode_color_fg).bg(mode_color_bg).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", role_str), Style::default().fg(CRUST).bg(role_color).add_modifier(Modifier::BOLD)),
         Span::raw(" ┃ "),
         Span::styled(&app.status, Style::default().fg(SUBTEXT0)),
         Span::raw("  "),

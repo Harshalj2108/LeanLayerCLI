@@ -97,6 +97,10 @@ pub async fn run(start_config: bool) -> Result<()> {
                             (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
                                 app.cycle_mode();
                             }
+                            // Agent Role cycle: Chat → Plan → Build → Chat (Ctrl+R)
+                            (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                app.cycle_role();
+                            }
                             // Enhancement #4: Interactive Config Settings UI (Ctrl+E)
                             (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
                                 app.active_modal = Some(crate::tui::app::ModalState::ConfigEditor {

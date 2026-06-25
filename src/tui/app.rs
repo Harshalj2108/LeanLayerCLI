@@ -60,6 +60,30 @@ impl AppMode {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AgentRole {
+    Chat,
+    Plan,
+    Build,
+}
+
+impl AgentRole {
+    pub fn cycle(self) -> Self {
+        match self {
+            AgentRole::Chat => AgentRole::Plan,
+            AgentRole::Plan => AgentRole::Build,
+            AgentRole::Build => AgentRole::Chat,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AgentRole::Chat => " CHAT ",
+            AgentRole::Plan => " PLAN ",
+            AgentRole::Build => " BUILD ",
+        }
+    }
+}
 #[derive(Clone)]
 pub enum ModalState {
     SessionViewer {
@@ -131,6 +155,7 @@ pub struct App<'a> {
     clipboard: Option<Clipboard>,
     pub backend_task: Option<JoinHandle<()>>,
     pub pinned_files: std::collections::HashSet<String>,
+    pub role: AgentRole,
 }
 
 impl<'a> App<'a> {
@@ -142,7 +167,7 @@ impl<'a> App<'a> {
         let mut messages = Vec::new();
 
         // Inject tool-calling system prompt
-        let tool_prompt = crate::agent::tools::build_tool_system_prompt();
+        let tool_prompt = crate::agent::tools::build_tool_system_prompt(crate::tui::app::AgentRole::Chat);
         messages.push(ChatMessage {
             role: "system".into(),
             content: tool_prompt,
@@ -189,6 +214,7 @@ impl<'a> App<'a> {
             clipboard: Clipboard::new().ok(),
             backend_task: None,
             pinned_files: std::collections::HashSet::new(),
+            role: AgentRole::Chat,
         })
     }
 
@@ -201,6 +227,16 @@ impl<'a> App<'a> {
 
     pub fn cycle_mode(&mut self) {
         self.mode = self.mode.cycle();
+    }
+
+    pub fn cycle_role(&mut self) {
+        self.role = self.role.cycle();
+        self.status = format!("Agent role: {}", self.role.label().trim());
+
+        let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role);
+        if let Some(sys) = self.messages.iter_mut().find(|m| m.role == "system") {
+            sys.content = new_prompt;
+        }
     }
 
     pub async fn update_rate_info(&mut self) {
