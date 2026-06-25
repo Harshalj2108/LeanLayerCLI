@@ -30,6 +30,10 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
+    /// Scrape a specific URL and extract markdown content
+    ScrapeUrl {
+        url: String,
+    },
 }
 
 /// Parse tool calls from assistant response
@@ -70,6 +74,7 @@ pub fn format_tool_result(call: &ToolCall, output: &str, success: bool) -> Strin
         ToolCall::WriteFile { path, .. } => format!("write_file: {}", path),
         ToolCall::SearchFiles { query, .. } => format!("search: {}", query),
         ToolCall::WebSearch { query } => format!("web_search: {}", query),
+        ToolCall::ScrapeUrl { url } => format!("scrape_url: {}", url),
     };
 
     let status = if success { "SUCCESS" } else { "FAILED" };
@@ -101,12 +106,18 @@ Execute any terminal/shell command:
 ```
 
 ### 4. Search Files
-Search for text patterns in workspace files:
+Search the workspace for text using ripgrep semantics:
 ```tool
-{"tool": "search_files", "query": "search term", "file_pattern": "*.rs"}
+{"tool": "search_files", "query": "struct App", "file_pattern": "*.rs"}
 ```
 
-### 5. Web Search
+### 5. Scrape URL
+Fetch a URL and extract its text content (useful for reading docs or web pages):
+```tool
+{"tool": "scrape_url", "url": "https://docs.rs"}
+```
+
+### 6. Web Search
 Search the internet for information:
 ```tool
 {"tool": "web_search", "query": "search query here"}

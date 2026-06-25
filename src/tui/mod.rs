@@ -73,7 +73,14 @@ pub async fn run(start_config: bool) -> Result<()> {
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
                 Event::Key(key) if key.kind != ratatui::crossterm::event::KeyEventKind::Release => {
-                    if app.active_modal.is_some() {
+                    if app.is_generating && key.code == KeyCode::Esc {
+                        if let Some(task) = app.backend_task.take() {
+                            task.abort();
+                        }
+                        app.is_generating = false;
+                        app.status = "Cancelled".into();
+                        app.token_rx = None;
+                    } else if app.active_modal.is_some() {
                         app.handle_key(key).await?;
                     } else {
                         match (key.code, key.modifiers) {

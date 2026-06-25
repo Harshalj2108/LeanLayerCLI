@@ -261,7 +261,7 @@ impl Backend {
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
         mode: AppMode,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         match self.api_provider.as_str() {
             "local" => self.send_local(messages, tx, mode),
             "openai" | "openrouter" | "nvidia" => self.send_openai_compat(messages, tx, mode),
@@ -271,6 +271,7 @@ impl Backend {
                 tx.send(BackendMessage::Error {
                     message: format!("Unknown API provider: {}", self.api_provider),
                 }).ok();
+                tokio::spawn(async move {})
             }
         }
     }
@@ -280,7 +281,7 @@ impl Backend {
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
         mode: AppMode,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let serialized_messages = serialize_messages_openai(&messages);
 
@@ -303,7 +304,7 @@ impl Backend {
             });
 
             stream_openai_response(&client, &url, body, None, tx).await;
-        });
+        })
     }
 
     fn send_openai_compat(
@@ -311,7 +312,7 @@ impl Backend {
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
         mode: AppMode,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let model = self.api_model.clone().unwrap_or_else(|| "gpt-4o".into());
         let api_key = self.api_key.clone();
@@ -333,7 +334,7 @@ impl Backend {
 
             let api_key_ref = api_key.as_deref();
             stream_openai_response(&client, &url, body, api_key_ref, tx).await;
-        });
+        })
     }
 
     fn send_gemini(
@@ -341,7 +342,7 @@ impl Backend {
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
         mode: AppMode,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let model = self.api_model.clone().unwrap_or_else(|| "gemini-2.5-flash".into());
         let api_key = self.api_key.clone();
         let serialized_messages = serialize_messages_openai(&messages);
@@ -362,7 +363,7 @@ impl Backend {
             });
 
             stream_openai_response(&client, url, body, api_key.as_deref(), tx).await;
-        });
+        })
     }
 
     fn send_anthropic(
@@ -370,7 +371,7 @@ impl Backend {
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
         mode: AppMode,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         let model = self.api_model.clone().unwrap_or_else(|| "claude-sonnet-4-20250514".into());
         let api_key = self.api_key.clone().unwrap_or_default();
         let url = format!("{}/v1/messages", self.base_url);
@@ -463,7 +464,7 @@ impl Backend {
                     }).ok();
                 }
             }
-        });
+        })
     }
 }
 
