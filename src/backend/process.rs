@@ -561,8 +561,20 @@ async fn stream_openai_chunks(
     let mut line_buf = String::new();
     let mut in_think = false;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let mut token_count = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                if token_count > 0 {
+                    tx.send(BackendMessage::Done).ok();
+                    return Ok(());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         let s = String::from_utf8_lossy(&chunk);
         
         for ch in s.chars() {
@@ -597,6 +609,7 @@ async fn stream_openai_chunks(
                             }
                         }
                         if !text.is_empty() {
+                            token_count += 1;
                             tx.send(BackendMessage::Token {
                                 content: text,
                             }).ok();
@@ -620,8 +633,20 @@ async fn stream_anthropic_response(
     let mut stream = resp.bytes_stream();
     let mut line_buf = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let mut token_count = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                if token_count > 0 {
+                    tx.send(BackendMessage::Done).ok();
+                    return Ok(());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         let s = String::from_utf8_lossy(&chunk);
         
         for ch in s.chars() {
@@ -642,6 +667,7 @@ async fn stream_anthropic_response(
                             if let Some(delta) = chunk.get("delta") {
                                 if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                                     if !text.is_empty() {
+                                        token_count += 1;
                                         tx.send(BackendMessage::Token {
                                             content: text.to_string(),
                                         }).ok();
