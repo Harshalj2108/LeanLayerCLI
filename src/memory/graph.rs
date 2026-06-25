@@ -61,6 +61,14 @@ impl MemoryGraph {
         Ok(Self { nodes, vault_path: vault_path.clone() })
     }
 
+    pub fn all_sessions(&self) -> Vec<&Node> {
+        let mut sessions: Vec<_> = self.nodes.values()
+            .filter(|n| matches!(n.kind, NodeKind::Session))
+            .collect();
+        sessions.sort_by(|a, b| b.id.cmp(&a.id));
+        sessions
+    }
+
     /// Return the N most recent/relevant nodes for display
     pub fn recent_nodes(&self, n: usize) -> Vec<&Node> {
         let mut sessions: Vec<_> = self.nodes.values()

@@ -43,10 +43,18 @@ pub async fn run(start_config: bool) -> Result<()> {
     let mut last_response_len = 0;
     let mut last_draw = Instant::now();
     let frame_budget = Duration::from_millis(16); // ~60fps cap
+    let rate_budget = Duration::from_secs(2);
     let mut needs_redraw = true;
+    let mut last_rate_update = Instant::now();
 
     loop {
-        app.tick();
+        app.tick().await;
+
+        if last_rate_update.elapsed() >= rate_budget {
+            app.update_rate_info().await;
+            last_rate_update = Instant::now();
+            needs_redraw = true;
+        }
 
         // State-driven redraw detection
         let current_len = app.current_response.len() + app.messages.len();
@@ -64,11 +72,7 @@ pub async fn run(start_config: bool) -> Result<()> {
 
         if event::poll(Duration::from_millis(10))? {
             match event::read()? {
-                Event::Key(key) => {
-                    // Drain any buffered key events to prevent input lag
-                    while event::poll(Duration::from_millis(0))? {
-                        let _ = event::read()?;
-                    }
+                Event::Key(key) if key.kind != ratatui::crossterm::event::KeyEventKind::Release => {
                     if app.active_modal.is_some() {
                         app.handle_key(key).await?;
                     } else {
@@ -94,7 +98,16 @@ pub async fn run(start_config: bool) -> Result<()> {
                                     cfg_draft: app.cfg.clone(),
                                 });
                             }
-                            (KeyCode::Tab, _) => app.toggle_focus(),
+                            // Phase 2.0: Workspace Panel (Ctrl+W)
+                            (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                                app.open_workspace_panel();
+                            }
+                            // Phase 2.0: Git Status (Ctrl+G)
+                            (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
+                                app.open_git_status();
+                            }
+                            // Fix: Use Ctrl+T to toggle focus instead of Tab, avoiding Alt+Tab phantom keystroke conflicts
+                            (KeyCode::Char('t'), KeyModifiers::CONTROL) => app.toggle_focus(),
                             _ => app.handle_key(key).await?,
                         }
                     }
