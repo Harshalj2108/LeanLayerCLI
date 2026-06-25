@@ -2,10 +2,10 @@ use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
-    text::{Line, Span},
-    prelude::Stylize,
-    widgets::{Block, Borders, BorderType, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
+    text::{Line, Span},    prelude::Stylize,
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap, Scrollbar, ScrollbarOrientation, ScrollbarState},
 };
+
 
 use super::app::{App, Focus};
 use super::graph::render_graph;
@@ -93,7 +93,18 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
         // Content indented elegantly
         let md_text = tui_markdown::from_str(&msg.content);
-        items.push(ListItem::new(md_text));
+        let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
+        for line in md_text.lines {
+            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
+            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+            if wrapped_lines.is_empty() {
+                items.push(ListItem::new(ratatui::text::Line::from("")));
+            } else {
+                for wrapped_line in wrapped_lines {
+                    items.push(ListItem::new(ratatui::text::Line::from(wrapped_line.into_owned())));
+                }
+            }
+        }
         items.push(ListItem::new(Line::from(""))); // Spacing
     }
 
@@ -104,7 +115,18 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Span::styled("▊", Style::default().fg(MAUVE).add_modifier(Modifier::RAPID_BLINK)),
         ])));
         let md_text = tui_markdown::from_str(&app.current_response);
-        items.push(ListItem::new(md_text));
+        let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
+        for line in md_text.lines {
+            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
+            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+            if wrapped_lines.is_empty() {
+                items.push(ListItem::new(ratatui::text::Line::from("")));
+            } else {
+                for wrapped_line in wrapped_lines {
+                    items.push(ListItem::new(ratatui::text::Line::from(wrapped_line.into_owned())));
+                }
+            }
+        }
     }
 
     let list = List::new(items.clone()).style(Style::default().fg(TEXT));
@@ -179,7 +201,12 @@ fn draw_input(f: &mut Frame, app: &mut App, area: Rect) {
         .bg(MANTLE);
 
     if app.is_generating {
-        let input = Paragraph::new("  ● Syncing with AI cluster node...")
+        let msg = if app.current_response.is_empty() {
+            "  ▊ Warming up models..."
+        } else {
+            "  ● Syncing with AI cluster node..."
+        };
+        let input = Paragraph::new(msg)
             .block(block)
             .style(Style::default().fg(SUBTEXT0).add_modifier(Modifier::ITALIC));
         f.render_widget(input, area);
@@ -191,28 +218,48 @@ fn draw_input(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let (mode_str, mode_color) = if app.thinking_mode {
+    let (mode_str, mode_color_bg, mode_color_fg) = if app.thinking_mode {
         (" DEEP ENGINE ", BASE, SAPPHIRE)
     } else {
         (" FAST ENGINE ", BASE, YELLOW)
     };
 
+    let rpm_pct = if app.rate_max > 0 { app.rate_rpm as f32 / app.rate_max as f32 } else { 0.0 };
+    let (rpm_color, rpm_label) = if rpm_pct >= 0.9 {
+        (RED, "RPM")
+    } else if rpm_pct >= 0.7 {
+        (YELLOW, "RPM")
+    } else {
+        (GREEN, "RPM")
+    };
+
+    let rpm_gauge = if app.rate_max > 0 {
+        let filled = (app.rate_rpm as f32 / app.rate_max as f32 * 10.0) as usize;
+        let empty = 10usize.saturating_sub(filled);
+        format!("{}{}{}", "█".repeat(filled), "░".repeat(empty), app.rate_rpm)
+    } else {
+        "--".into()
+    };
+
+    let actual_ctx_size = app.backend.actual_ctx_size;
+    let token_pct = if actual_ctx_size > 0 { app.token_count as f32 / actual_ctx_size as f32 } else { 0.0 };
+    let token_color = if token_pct > 0.9 { RED } else if token_pct > 0.7 { YELLOW } else { GREEN };
+    let token_gauge = if actual_ctx_size > 0 {
+        format!("Ctx: {}/{}", app.token_count, actual_ctx_size)
+    } else {
+        format!("Ctx: {}/Auto", app.token_count)
+    };
+
     let status = Paragraph::new(Line::from(vec![
         Span::styled(" AIRLLM ", Style::default().fg(CRUST).bg(BLUE).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{}", mode_str), Style::default().fg(mode_color.0).bg(mode_color.1).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{}", mode_str), Style::default().fg(mode_color_fg).bg(mode_color_bg).add_modifier(Modifier::BOLD)),
         Span::raw(" ┃ "),
         Span::styled(&app.status, Style::default().fg(SUBTEXT0)),
         Span::raw("  "),
-        Span::styled("Ctrl+V", Style::default().fg(BLUE)),
-        Span::raw(" Paste ⚡ "),
-        Span::styled("Ctrl+Y", Style::default().fg(BLUE)),
-        Span::raw(" Yank ⚡ "),
-        Span::styled("Ctrl+M", Style::default().fg(BLUE)),
-        Span::raw(" Engine ⚡ "),
-        Span::styled("Tab", Style::default().fg(BLUE)),
-        Span::raw(" Shift Focus ⚡ "),
-        Span::styled("Ctrl+Q", Style::default().fg(RED)),
-        Span::raw(" Quit"),
+        Span::styled(rpm_label, Style::default().fg(rpm_color)),
+        Span::styled(format!(" {} ", rpm_gauge), Style::default().fg(rpm_color)),
+        Span::raw(" ┃ "),
+        Span::styled(token_gauge, Style::default().fg(token_color)),
     ])).bg(CRUST);
 
     f.render_widget(status, area);
@@ -244,11 +291,15 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .constraints([Constraint::Min(0), Constraint::Length(1)])
                 .split(inner_area);
 
-            let md_text = tui_markdown::from_str(content);
+            let md_text = tui_markdown::from_str(&content);
             let total_lines = md_text.lines.len();
             let scroll_pos = (*scroll).min(total_lines.saturating_sub(modal_layout[0].height as usize));
-            
-            f.render_widget(Paragraph::new(md_text).wrap(Wrap { trim: false }).scroll((scroll_pos as u16, 0)), modal_layout[0]);
+            let converted_lines = md_text.lines.into_iter().map(|line| {
+                let spans = line.spans.into_iter().map(|s| Span::styled(s.content, ratatui::style::Style::default())).collect::<Vec<_>>();
+                ratatui::text::Line::from(spans)
+            }).collect::<Vec<_>>();
+            let paragraph = Paragraph::new(converted_lines).wrap(Wrap { trim: false }).scroll((scroll_pos as u16, 0));
+            f.render_widget(paragraph, modal_layout[0]);
 
             let mut footer_spans = vec![
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
@@ -328,7 +379,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 let marker = if is_active { "❯ " } else { "  " };
                 let style = if is_active { Style::default().fg(BLUE).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
                 
-                let text = format{}{}{} : {}", marker, name, val);
+                let text = format!("{}{} : {}", marker, name, val);
                 items.push(ratatui::widgets::ListItem::new(text).style(style));
             }
             
@@ -369,7 +420,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
                 let first_line = code.lines().next().unwrap_or("").trim();
                 let preview = if first_line.len() > 14 { format!("{}...", &first_line[..12]) } else { first_line.to_string() };
-                items.push(ListItem::new(format{}{}[{}] {}", marker, i + 1, lang, preview)).style(style));
+                items.push(ListItem::new(format!("{}{} {}", marker, lang, preview)).style(style));
             }
 
             f.render_widget(List::new(items), horizontal_layout[0]);
@@ -390,6 +441,143 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 Span::raw(" Yank Block ┃ "),
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
                 Span::raw(" Cancel"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::WorkspacePanel { files, selected_index, scroll } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut items = Vec::new();
+            for (i, file) in files.iter().enumerate() {
+                let is_active = *selected_index == i;
+                let marker = if is_active { "❯ " } else { "  " };
+                let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
+
+                let depth = file.relative_path.matches('/').count();
+                let indent = "  ".repeat(depth);
+                let icon = if file.is_dir { "📁" } else { "📄" };
+                let name = file.relative_path.split('/').last().unwrap_or(&file.relative_path);
+                let size_str = if file.is_dir { String::new() } else { format!(" ({}B)", file.size) };
+
+                let display = format!("{}{} {}{}", indent, icon, name, size_str);
+                items.push(ListItem::new(format!("{}{}", marker, display)).style(style));
+            }
+
+            let list = List::new(items)
+                .block(Block::default().title(Span::styled(" Workspace Explorer ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD))).borders(Borders::BOTTOM))
+                .highlight_symbol("")
+                .highlight_style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD));
+            f.render_widget(list, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN)),
+                Span::raw(" Read File  "),
+                Span::styled(" R ", Style::default().fg(CRUST).bg(BLUE)),
+                Span::raw(" Refresh  "),
+                Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Close"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::GitStatusModal { status, selected_index, scroll } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut items = Vec::new();
+            let total_items = status.modified_files.len() + status.untracked_files.len();
+
+            // Header: branch info
+            items.push(ListItem::new(format!("🌿 Branch: {}", status.branch)).style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)));
+            items.push(ListItem::new(""));
+
+            if !status.modified_files.is_empty() {
+                items.push(ListItem::new("Modified:").style(Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)));
+                for (i, file) in status.modified_files.iter().enumerate() {
+                    let idx = i + 2;
+                    let is_active = *selected_index == idx;
+                    let marker = if is_active { "❯ " } else { "  " };
+                    let style = if is_active { Style::default().fg(YELLOW).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
+                    items.push(ListItem::new(format!("{}📝 {}", marker, file)).style(style));
+                }
+            }
+
+            if !status.untracked_files.is_empty() {
+                items.push(ListItem::new(""));
+                items.push(ListItem::new("Untracked:").style(Style::default().fg(RED).add_modifier(Modifier::BOLD)));
+                let offset = status.modified_files.len() + 2 + (if status.modified_files.is_empty() { 0 } else { 1 });
+                for (i, file) in status.untracked_files.iter().enumerate() {
+                    let idx = offset + i;
+                    let is_active = *selected_index == idx;
+                    let marker = if is_active { "❯ " } else { "  " };
+                    let style = if is_active { Style::default().fg(RED).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
+                    items.push(ListItem::new(format!("{}❓ {}", marker, file)).style(style));
+                }
+            }
+
+            if total_items == 0 {
+                items.push(ListItem::new(""));
+                items.push(ListItem::new("Working tree clean").style(Style::default().fg(GREEN).add_modifier(Modifier::BOLD)));
+            }
+
+            let list = List::new(items)
+                .block(Block::default().title(Span::styled(" Git Status ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD))).borders(Borders::BOTTOM))
+                .highlight_symbol("")
+                .highlight_style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD));
+            f.render_widget(list, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Close"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
+        super::app::ModalState::DiffReview { path, diff, .. } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut lines: Vec<Line> = Vec::new();
+            lines.push(Line::from(vec![
+                Span::styled("File: ", Style::default().fg(SUBTEXT0)),
+                Span::styled(path.clone(), Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
+            ]));
+            lines.push(Line::from(""));
+
+            for line in diff.lines() {
+                let styled = if line.starts_with('+') && !line.starts_with("+++") {
+                    Line::from(vec![Span::styled(line.to_string(), Style::default().fg(GREEN))])
+                } else if line.starts_with('-') && !line.starts_with("---") {
+                    Line::from(vec![Span::styled(line.to_string(), Style::default().fg(RED))])
+                } else if line.starts_with('@') {
+                    Line::from(vec![Span::styled(line.to_string(), Style::default().fg(BLUE))])
+                } else {
+                    Line::from(line.to_string())
+                };
+                lines.push(styled);
+            }
+
+            let paragraph = Paragraph::new(lines)
+                .wrap(Wrap { trim: false })
+                .block(Block::default()
+                    .title(Span::styled(" Diff Review ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(SURFACE0)));
+            f.render_widget(paragraph, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN).add_modifier(Modifier::BOLD)),
+                Span::raw(" Accept Write  "),
+                Span::styled(" Esc ", Style::default().fg(CRUST).bg(RED).add_modifier(Modifier::BOLD)),
+                Span::raw(" Reject"),
             ]);
             f.render_widget(Paragraph::new(footer), vertical_layout[1]);
         }
