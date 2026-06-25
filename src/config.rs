@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
+    #[serde(default = "default_model_path")]
     pub model_path: String,
     pub vault_path: String,
     pub max_context_nodes: usize,
@@ -20,7 +21,7 @@ pub struct Config {
     pub port: u16,
 
     // Cloud / multi-provider support
-    /// Backend provider: "local", "openai", "gemini", "anthropic", "openrouter"
+    /// Backend provider: "local", "openai", "gemini", "anthropic", "openrouter", "nvidia"
     #[serde(default = "default_api_provider")]
     pub api_provider: String,
     /// API key for cloud providers (can also use env vars: OPENAI_API_KEY, GEMINI_API_KEY, etc.)
@@ -32,17 +33,28 @@ pub struct Config {
     /// Optional API key for web search (reserved for future use)
     #[serde(default)]
     pub search_api_key: Option<String>,
+
+    // Agentic
+    #[serde(default = "default_trust_level")]
+    pub trust_level: String,
+    #[serde(default = "default_max_agent_iterations")]
+    pub max_agent_iterations: usize,
 }
 
 fn default_gpu_layers() -> i32 { 99 }
-fn default_ctx_size() -> usize { 8192 }
+fn default_ctx_size() -> usize { 0 }
 fn default_port() -> u16 { 8081 }
 fn default_api_provider() -> String { "local".into() }
+
+fn default_trust_level() -> String { "ask".into() }
+fn default_max_agent_iterations() -> usize { 5 }
+
+fn default_model_path() -> String { "".into() }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
-            model_path: "/models/gemma-4-31b".into(),
+            model_path: default_model_path(),
             vault_path: default_vault_path(),
             max_context_nodes: 5,
             summarize_on_exit: true,
@@ -55,6 +67,8 @@ impl Default for Config {
             api_key: None,
             api_model: None,
             search_api_key: None,
+            trust_level: default_trust_level(),
+            max_agent_iterations: default_max_agent_iterations(),
         }
     }
 }
@@ -116,6 +130,7 @@ pub fn resolve_api_key(cfg: &Config) -> Option<String> {
         "gemini" => "GEMINI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",
         "openrouter" => "OPENROUTER_API_KEY",
+        "nvidia" => "NVIDIA_API_KEY",
         _ => return None,
     };
 

@@ -14,14 +14,18 @@ path = "src/main.rs"
 
 [dependencies]
 # TUI
-ratatui = "0.28.1"
+ratatui = "0.29.0"
 crossterm = "0.27"
-tui-textarea = "0.6.1"
-tui-markdown = "0.2.12"
-ureq = { version = "2", features = ["json"] }
+tui-textarea = "0.7.0"
+
+# HTTP / Async
+reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest-eventsource = "0.5"
+
 
 # Async
 tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -41,7 +45,15 @@ uuid = { version = "1", features = ["v4"] }
 textwrap = "0.16.2"
 arboard = "3.6.1"
 
+# Search
+regex = "1"
+walkdir = "2"
+ignore = "0.4"
+
 # Image / multimodal
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 base64 = "0.22"
+tui-markdown = "0.3.7"
+sysinfo = "0.39.5"
+tiktoken-rs = "0.12.0"
 

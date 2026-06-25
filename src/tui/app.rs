@@ -7,6 +7,7 @@ use arboard::Clipboard;
 use crate::backend::{
     process::Backend,
     protocol::{BackendMessage, ChatMessage},
+    ratelimit::RateLimiterHandle,
 };
 use crate::config::Config;
 use crate::memory::{
@@ -14,6 +15,7 @@ use crate::memory::{
     summarize::summarize_session,
     vault::VaultWriter,
 };
+use crate::agent::workspace::{WorkspaceFile, GitStatus};
 
 pub enum Focus {
     Chat,
@@ -47,6 +49,21 @@ pub enum ModalState {
         selected_index: usize,
         preview_scroll: usize,
     },
+    WorkspacePanel {
+        files: Vec<WorkspaceFile>,
+        selected_index: usize,
+        scroll: usize,
+    },
+    GitStatusModal {
+        status: GitStatus,
+        selected_index: usize,
+        scroll: usize,
+    },
+    DiffReview {
+        path: String,
+        diff: String,
+        proposed_content: String,
+    },
 }
 
 pub struct App<'a> {
@@ -60,18 +77,26 @@ pub struct App<'a> {
     pub should_quit: bool,
     pub graph: MemoryGraph,
     pub thinking_mode: bool,
-    backend: Backend,
+    pub backend: Backend,
     pub scroll: usize,
     pub graph_scroll: usize,
     pub selected_node_index: usize,
     pub active_modal: Option<ModalState>,
     pub token_rx: Option<mpsc::UnboundedReceiver<BackendMessage>>,
+    pub rate_limiter: RateLimiterHandle,
+    pub rate_rpm: u32,
+    pub rate_remaining: u32,
+    pub rate_max: u32,
+    pub agent_iteration_count: usize,
+    pub token_count: usize,
+    bpe: Option<tiktoken_rs::CoreBPE>,
     clipboard: Option<Clipboard>,
 }
 
 impl<'a> App<'a> {
     pub async fn new(cfg: Config) -> Result<Self> {
         let backend = Backend::spawn(&cfg)?;
+        let rate_limiter = backend.get_rate_limiter();
         let graph = MemoryGraph::load(&std::path::PathBuf::from(&cfg.vault_path))?;
 
         let mut messages = Vec::new();
@@ -114,6 +139,13 @@ impl<'a> App<'a> {
             selected_node_index: 0,
             active_modal: None,
             token_rx: None,
+            rate_limiter,
+            rate_rpm: 0,
+            rate_remaining: 40,
+            rate_max: 40,
+            agent_iteration_count: 0,
+            token_count: 0,
+            bpe: tiktoken_rs::cl100k_base().ok(),
             clipboard: Clipboard::new().ok(),
         })
     }
@@ -129,12 +161,53 @@ impl<'a> App<'a> {
         self.thinking_mode = !self.thinking_mode;
     }
 
-    pub fn tick(&mut self) {
+    pub async fn update_rate_info(&mut self) {
+        let provider = &self.cfg.api_provider;
+        self.rate_rpm = self.rate_limiter.current_rpm(provider).await;
+        self.rate_remaining = self.rate_limiter.remaining(provider).await;
+        self.rate_max = self.rate_limiter.max_rpm();
+    }
+
+    pub fn open_workspace_panel(&mut self) {
+        let root = std::path::PathBuf::from(&self.cfg.vault_path);
+        match crate::agent::workspace::scan_workspace(&root, 5) {
+            Ok(files) => {
+                self.active_modal = Some(ModalState::WorkspacePanel {
+                    files,
+                    selected_index: 0,
+                    scroll: 0,
+                });
+                self.status = "Workspace: Up/Down, Enter to read, R to refresh, Esc to close".into();
+            }
+            Err(e) => {
+                self.status = format!("Failed to scan workspace: {}", e);
+            }
+        }
+    }
+
+    pub fn open_git_status(&mut self) {
+        let root = std::path::PathBuf::from(&self.cfg.vault_path);
+        if let Some(status) = crate::agent::workspace::get_git_status(&root) {
+            let total_items = status.modified_files.len() + status.untracked_files.len();
+            self.active_modal = Some(ModalState::GitStatusModal {
+                status,
+                selected_index: 0,
+                scroll: 0,
+            });
+            self.status = format!("Git status ({} changes). Up/Down, Esc to close", total_items);
+        } else {
+            self.status = "Not a git repository or git not available".into();
+        }
+    }
+
+    pub async fn tick(&mut self) {
+        let mut needs_token_update = false;
         if let Some(rx) = &mut self.token_rx {
             loop {
                 match rx.try_recv() {
                     Ok(BackendMessage::Token { content }) => {
                         self.current_response.push_str(&content);
+                        needs_token_update = true;
                     }
                     Ok(BackendMessage::Done) => {
                         self.messages.push(ChatMessage {
@@ -147,10 +220,70 @@ impl<'a> App<'a> {
                         if !tool_calls.is_empty() {
                             let mut pending = tool_calls;
                             let first = pending.remove(0);
-                            self.active_modal = Some(ModalState::ToolGatekeeper {
-                                call: first,
-                                pending_others: pending,
-                            });
+                            
+                            if self.cfg.trust_level == "auto" {
+                                self.status = "Auto-executing tool...".into();
+                                let result = match &first {
+                                    crate::agent::tools::ToolCall::RunCommand { command, working_dir } => {
+                                        let dir = working_dir.clone().unwrap_or_else(|| ".".into());
+                                        crate::agent::executor::execute_tool_command(command, &dir)
+                                    }
+                                    crate::agent::tools::ToolCall::ReadFile { path } => {
+                                        crate::agent::executor::read_file_global(path)
+                                    }
+                                    crate::agent::tools::ToolCall::WriteFile { path, content } => {
+                                        crate::agent::executor::write_file_global(path, content)
+                                    }
+                                    crate::agent::tools::ToolCall::SearchFiles { query, file_pattern } => {
+                                        let root = std::path::PathBuf::from(&self.cfg.vault_path);
+                                        crate::agent::executor::search_files(&root, query, file_pattern.as_deref(), 20)
+                                    }
+                                    crate::agent::tools::ToolCall::WebSearch { query } => {
+                                        crate::agent::executor::execute_web_search(query).await
+                                    }
+                                };
+                                
+                                let (out, success) = match result {
+                                    Ok(crate::agent::executor::ExecutionStatus::Completed { stdout, stderr, exit_code }) => {
+                                        let mut s = stdout;
+                                        if !stderr.is_empty() { s.push_str("\n--- STDERR ---\n"); s.push_str(&stderr); }
+                                        (s, exit_code == 0)
+                                    }
+                                    Ok(crate::agent::executor::ExecutionStatus::Failed(e)) => (e, false),
+                                    Err(e) => (e.to_string(), false),
+                                    _ => ("Unknown error".into(), false),
+                                };
+
+                                self.messages.push(ChatMessage {
+                                    role: "user".into(),
+                                    content: crate::agent::tools::format_tool_result(&first, &out, success),
+                                    images: None,
+                                });
+                                
+                                self.agent_iteration_count += 1;
+                                if self.agent_iteration_count > self.cfg.max_agent_iterations {
+                                    self.messages.push(ChatMessage {
+                                        role: "user".into(),
+                                        content: "System: Maximum autonomous agent iterations reached. Awaiting user guidance.".into(),
+                                        images: None,
+                                    });
+                                } else {
+                                    if !pending.is_empty() {
+                                        self.active_modal = Some(ModalState::ToolGatekeeper {
+                                            call: pending.remove(0),
+                                            pending_others: pending,
+                                        });
+                                    } else {
+                                        let _ = self.trigger_backend();
+                                        return; // We are generating again, don't clear token_rx
+                                    }
+                                }
+                            } else {
+                                self.active_modal = Some(ModalState::ToolGatekeeper {
+                                    call: first,
+                                    pending_others: pending,
+                                });
+                            }
                         } else {
                             let exec_blocks = crate::agent::executor::detect_executable_blocks(&self.current_response);
                             if !exec_blocks.is_empty() {
@@ -170,20 +303,28 @@ impl<'a> App<'a> {
                         break;
                     }
                     Ok(BackendMessage::Error { message }) => {
-                        self.status = format!("Error: {}", message);
-                        self.is_generating = false;
+                        self.messages.push(ChatMessage {
+                            role: "assistant".into(),
+                            content: format!("⚠️ **API Error**:\n\n{}", message),
+                            images: None,
+                        });
+                        self.status = "API Error".into();
+                        self.status = "Ready".into();
                         self.token_rx = None;
                         break;
                     }
                     Ok(_) => {}
-                    Err(mpsc::error::TryRecvError::Empty) => break,
-                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         self.is_generating = false;
                         self.token_rx = None;
                         break;
                     }
                 }
             }
+        }
+        if needs_token_update {
+            self.update_token_count();
         }
     }
 
@@ -234,7 +375,7 @@ impl<'a> App<'a> {
                             });
                             if pending_others.is_empty() {
                                 self.active_modal = None;
-                                self.submit()?;
+                                let _ = self.trigger_backend();
                             } else {
                                 let mut p = pending_others;
                                 let next = p.remove(0);
@@ -252,14 +393,30 @@ impl<'a> App<'a> {
                                     crate::agent::executor::read_file_global(path)
                                 }
                                 crate::agent::tools::ToolCall::WriteFile { path, content } => {
-                                    crate::agent::executor::write_file_global(path, content)
+                                    match crate::agent::executor::read_file_for_diff(path) {
+                                        Ok(original) => {
+                                            let diff = crate::agent::executor::generate_file_diff(path, original.as_deref(), content);
+                                            self.active_modal = Some(ModalState::DiffReview {
+                                                path: path.clone(),
+                                                diff,
+                                                proposed_content: content.clone(),
+                                            });
+                                            return Ok(());
+                                        }
+                                        Err(_) => {
+                                            crate::agent::executor::write_file_global(path, content)
+                                        }
+                                    }
                                 }
-                                crate::agent::tools::ToolCall::SearchFiles { query: _, .. } => {
-                                    Ok(crate::agent::executor::ExecutionStatus::Failed("Search not natively implemented".into()))
+                                crate::agent::tools::ToolCall::SearchFiles { query, file_pattern } => {
+                                    self.status = format!("Searching for: {}...", query);
+                                    let root = std::path::PathBuf::from(&self.cfg.vault_path);                                    crate::agent::executor::search_files(
+                                        &root,
+                                        query,                                        file_pattern.as_deref(),                                        20,                                    )
                                 }
                                 crate::agent::tools::ToolCall::WebSearch { query } => {
                                     self.status = format!("Searching the web: {}...", query);
-                                    crate::agent::executor::execute_web_search(query)
+                                    crate::agent::executor::execute_web_search(query).await
                                 }
                             };
                             
@@ -282,7 +439,7 @@ impl<'a> App<'a> {
                             
                             if pending_others.is_empty() {
                                 self.active_modal = None;
-                                self.submit()?;
+                                let _ = self.trigger_backend();
                             } else {
                                 let mut p = pending_others;
                                 let next = p.remove(0);
@@ -307,7 +464,7 @@ impl<'a> App<'a> {
                                         images: None,
                                     });
                                     self.active_modal = None;
-                                    self.submit()?;
+                                    let _ = self.trigger_backend();
                                 }
                                 _ => {
                                     self.active_modal = None;
@@ -458,6 +615,128 @@ impl<'a> App<'a> {
                         }
                     }
                 }
+                ModalState::WorkspacePanel { files, selected_index, scroll } => {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.active_modal = None;
+                            self.status = "Ready".into();
+                        }
+                        KeyCode::Up => {
+                            if let Some(ModalState::WorkspacePanel { selected_index: idx, .. }) = &mut self.active_modal {
+                                *idx = idx.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            if let Some(ModalState::WorkspacePanel { selected_index: idx, files, .. }) = &mut self.active_modal {
+                                if !files.is_empty() {
+                                    *idx = (*idx + 1).min(files.len() - 1);
+                                }
+                            }
+                        }
+                        KeyCode::Char('r') => {
+                            // Refresh workspace scan
+                            if let Some(ModalState::WorkspacePanel { files, selected_index, .. }) = &mut self.active_modal {
+                                if let Ok(new_files) = crate::agent::workspace::scan_workspace(std::path::PathBuf::from(&self.cfg.vault_path).as_path(), 5) {
+                                    *files = new_files;
+                                    *selected_index = 0;
+                                    self.status = "Workspace refreshed".into();
+                                }
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(ModalState::WorkspacePanel { files, selected_index, .. }) = &self.active_modal {
+                                if let Some(file) = files.get(*selected_index) {
+                                    if !file.is_dir {
+                                        let path = file.relative_path.clone();
+                                        if path.starts_with("sessions") || path.starts_with("concepts") {
+                                            let full_path = std::path::PathBuf::from(&self.cfg.vault_path).join(&path);
+                                            if let Ok(content) = std::fs::read_to_string(full_path) {
+                                                let is_session = path.starts_with("sessions");
+                                                let name = std::path::Path::new(&path).file_stem().unwrap_or_default().to_string_lossy().to_string();
+                                                self.active_modal = Some(ModalState::SessionViewer {
+                                                    title: name.clone(),
+                                                    content,
+                                                    scroll: 0,
+                                                    node_id: name,
+                                                    is_session,
+                                                });
+                                                self.status = format!("Loaded {}", path);
+                                            }
+                                        } else {
+                                            let tool_call = crate::agent::tools::ToolCall::ReadFile { path };
+                                            self.active_modal = Some(ModalState::ToolGatekeeper {
+                                                call: tool_call,
+                                                pending_others: Vec::new(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ModalState::GitStatusModal { status: git_status, selected_index, scroll } => {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('q') => {
+                            self.active_modal = None;
+                            self.status = "Ready".into();
+                        }
+                        KeyCode::Up => {
+                            if let Some(ModalState::GitStatusModal { selected_index: idx, .. }) = &mut self.active_modal {
+                                *idx = idx.saturating_sub(1);
+                            }
+                        }
+                        KeyCode::Down => {
+                            let total_items = if let Some(ModalState::GitStatusModal { status, .. }) = &self.active_modal {
+                                status.modified_files.len() + status.untracked_files.len() + 1
+                            } else { 0 };
+                            if let Some(ModalState::GitStatusModal { selected_index: idx, .. }) = &mut self.active_modal {
+                                if total_items > 0 {
+                                    *idx = (*idx + 1).min(total_items - 1);
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                ModalState::DiffReview { path, diff, proposed_content } => {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('n') => {
+                            let call = crate::agent::tools::ToolCall::WriteFile { path: path.clone(), content: proposed_content.clone() };
+                            self.messages.push(ChatMessage {
+                                role: "user".into(),
+                                content: crate::agent::tools::format_tool_result(&call, "Write denied by user.", false),
+                                images: None,
+                            });
+                            self.active_modal = None;
+                            let _ = self.trigger_backend();
+                        }
+                        KeyCode::Enter | KeyCode::Char('y') => {
+                            self.status = format!("Writing: {}...", path);
+                            let result = crate::agent::executor::write_file_global(&path, &proposed_content);
+                            let call = crate::agent::tools::ToolCall::WriteFile { path: path.clone(), content: String::new() };
+                            let (out, success) = match result {
+                                Ok(crate::agent::executor::ExecutionStatus::Completed { stdout, stderr, exit_code }) => {
+                                    let mut s = stdout;
+                                    if !stderr.is_empty() { s.push_str("\n--- STDERR ---\n"); s.push_str(&stderr); }
+                                    (s, exit_code == 0)
+                                }
+                                Ok(crate::agent::executor::ExecutionStatus::Failed(e)) => (e, false),
+                                Err(e) => (e.to_string(), false),
+                                _ => ("Unknown error".into(), false),
+                            };
+                            self.messages.push(ChatMessage {
+                                role: "user".into(),
+                                content: crate::agent::tools::format_tool_result(&call, &out, success),
+                                images: None,
+                            });
+                            self.active_modal = None;
+                            let _ = self.trigger_backend();
+                        }
+                        _ => {}
+                    }
+                }
             }
             return Ok(());
         }
@@ -530,7 +809,7 @@ impl<'a> App<'a> {
                             .join(folder)
                             .join(format!("{}.md", node_id));
 
-                        if let Ok(content) = std::fs::read_to_string(filepath) {
+                        if let Ok(content) = tokio::fs::read_to_string(filepath).await {
                             self.active_modal = Some(ModalState::SessionViewer {
                                 title: node.label.clone(),
                                 content,
@@ -684,6 +963,24 @@ impl<'a> App<'a> {
             images,
         });
 
+        self.agent_iteration_count = 0;
+        self.update_token_count();
+        self.trigger_backend()
+    }
+
+    pub fn update_token_count(&mut self) {
+        if let Some(bpe) = &self.bpe {
+            let mut text = String::new();
+            for msg in &self.messages {
+                text.push_str(&msg.content);
+                text.push('\n');
+            }
+            text.push_str(&self.current_response);
+            self.token_count = bpe.encode_ordinary(&text).len();
+        }
+    }
+
+    pub fn trigger_backend(&mut self) -> Result<()> {
         self.is_generating = true;
         self.current_response.clear();
         self.status = "Generating...".into();
@@ -705,15 +1002,8 @@ impl<'a> App<'a> {
 
             if !history.is_empty() {
                 let cfg = self.cfg.clone();
-                std::thread::spawn(move || {
-                    let mut b = crate::backend::process::Backend {
-                        base_url: format!("http://127.0.0.1:{}", cfg.port),
-                        child: None,
-                        api_provider: cfg.api_provider.clone(),
-                        api_key: crate::config::resolve_api_key(&cfg),
-                        api_model: cfg.api_model.clone(),
-                    };
-                    if let Ok(summary) = summarize_session(&mut b, &history) {
+                tokio::spawn(async move {
+                    if let Ok(summary) = summarize_session(&history).await {
                         if let Ok(vault) = VaultWriter::new(&cfg) {
                             let _ = vault.write_session(
                                 &summary.summary,
