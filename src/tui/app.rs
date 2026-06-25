@@ -1,6 +1,7 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind, KeyModifiers};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use tui_textarea::TextArea;
 use arboard::Clipboard;
 
@@ -128,6 +129,8 @@ pub struct App<'a> {
     pub token_count: usize,
     bpe: Option<tiktoken_rs::CoreBPE>,
     clipboard: Option<Clipboard>,
+    pub backend_task: Option<JoinHandle<()>>,
+    pub pinned_files: std::collections::HashSet<String>,
 }
 
 impl<'a> App<'a> {
@@ -184,6 +187,8 @@ impl<'a> App<'a> {
             token_count: 0,
             bpe: tiktoken_rs::cl100k_base().ok(),
             clipboard: Clipboard::new().ok(),
+            backend_task: None,
+            pinned_files: std::collections::HashSet::new(),
         })
     }
 
@@ -277,6 +282,9 @@ impl<'a> App<'a> {
                                     }
                                     crate::agent::tools::ToolCall::WebSearch { query } => {
                                         crate::agent::executor::execute_web_search(query).await
+                                    }
+                                    crate::agent::tools::ToolCall::ScrapeUrl { url } => {
+                                        crate::agent::executor::execute_web_scrape(url).await
                                     }
                                 };
                                 
@@ -454,6 +462,10 @@ impl<'a> App<'a> {
                                 crate::agent::tools::ToolCall::WebSearch { query } => {
                                     self.status = format!("Searching the web: {}...", query);
                                     crate::agent::executor::execute_web_search(query).await
+                                }
+                                crate::agent::tools::ToolCall::ScrapeUrl { url } => {
+                                    self.status = format!("Scraping URL: {}...", url);
+                                    crate::agent::executor::execute_web_scrape(url).await
                                 }
                             };
                             
@@ -677,6 +689,23 @@ impl<'a> App<'a> {
                                     *files = new_files;
                                     *selected_index = 0;
                                     self.status = "Workspace refreshed".into();
+                                }
+                            }
+                        }
+                        KeyCode::Char('p') => {
+                            // Toggle pin for selected file
+                            if let Some(ModalState::WorkspacePanel { files, selected_index, .. }) = &self.active_modal {
+                                if let Some(file) = files.get(*selected_index) {
+                                    if !file.is_dir {
+                                        let path = file.relative_path.clone();
+                                        if self.pinned_files.contains(&path) {
+                                            self.pinned_files.remove(&path);
+                                            self.status = format!("Unpinned {}", path);
+                                        } else {
+                                            self.pinned_files.insert(path.clone());
+                                            self.status = format!("Pinned {}", path);
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1025,7 +1054,23 @@ impl<'a> App<'a> {
         let (tx, rx) = mpsc::unbounded_channel();
         self.token_rx = Some(rx);
 
-        self.backend.send_generate(self.messages.clone(), tx, self.mode);
+        let mut req_messages = self.messages.clone();
+
+        for pinned in &self.pinned_files {
+            if let Ok(content) = std::fs::read_to_string(pinned) {
+                req_messages.insert(
+                    0,
+                    crate::backend::protocol::ChatMessage {
+                        role: "system".into(),
+                        content: format!("[PINNED FILE: {}]\n\n{}", pinned, content),
+                        images: None,
+                    }
+                );
+            }
+        }
+
+        let handle = self.backend.send_generate(req_messages, tx, self.mode);
+        self.backend_task = Some(handle);
 
         Ok(())
     }

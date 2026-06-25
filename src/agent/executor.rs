@@ -145,6 +145,32 @@ pub fn write_file_global(path: &str, content: &str) -> Result<ExecutionStatus> {
     }
 }
 
+/// Fetch a URL and convert its HTML content to Markdown
+pub async fn execute_web_scrape(url: &str) -> Result<ExecutionStatus> {
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .build()?;
+        
+    match client.get(url).send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return Ok(ExecutionStatus::Failed(format!("HTTP Error: {}", resp.status())));
+            }
+            if let Ok(html) = resp.text().await {
+                let markdown = html2md::parse_html(&html);
+                Ok(ExecutionStatus::Completed {
+                    stdout: markdown,
+                    stderr: "".into(),
+                    exit_code: 0,
+                })
+            } else {
+                Ok(ExecutionStatus::Failed("Failed to read response body".into()))
+            }
+        }
+        Err(e) => Ok(ExecutionStatus::Failed(format!("Request failed: {}", e))),
+    }
+}
+
 /// Execute a web search using DuckDuckGo HTML interface (no API key required)
 pub async fn execute_web_search(query: &str) -> Result<ExecutionStatus> {
     let encoded_query = query.replace(' ', "+");

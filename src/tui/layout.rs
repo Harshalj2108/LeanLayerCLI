@@ -461,9 +461,11 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 let indent = "  ".repeat(depth);
                 let icon = if file.is_dir { "📁" } else { "📄" };
                 let name = file.relative_path.split('/').last().unwrap_or(&file.relative_path);
+                let is_pinned = app.pinned_files.contains(&file.relative_path);
+                let pin_badge = if is_pinned { " 📌 " } else { "" };
                 let size_str = if file.is_dir { String::new() } else { format!(" ({}B)", file.size) };
 
-                let display = format!("{}{} {}{}", indent, icon, name, size_str);
+                let display = format!("{}{} {}{}{}", indent, icon, name, pin_badge, size_str);
                 items.push(ListItem::new(format!("{}{}", marker, display)).style(style));
             }
 
@@ -476,6 +478,8 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let footer = Line::from(vec![
                 Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN)),
                 Span::raw(" Read File  "),
+                Span::styled(" P ", Style::default().fg(CRUST).bg(YELLOW)),
+                Span::raw(" Pin File  "),
                 Span::styled(" R ", Style::default().fg(CRUST).bg(BLUE)),
                 Span::raw(" Refresh  "),
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
