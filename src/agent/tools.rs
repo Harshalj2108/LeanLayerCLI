@@ -30,9 +30,12 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
-    /// Scrape a specific URL and extract markdown content
-    ScrapeUrl {
-        url: String,
+    /// Call a tool on an external MCP server
+    #[serde(rename = "mcp_tool")]
+    McpToolCall {
+        server: String,
+        name: String,
+        args: serde_json::Value,
     },
 }
 
@@ -74,7 +77,7 @@ pub fn format_tool_result(call: &ToolCall, output: &str, success: bool) -> Strin
         ToolCall::WriteFile { path, .. } => format!("write_file: {}", path),
         ToolCall::SearchFiles { query, .. } => format!("search: {}", query),
         ToolCall::WebSearch { query } => format!("web_search: {}", query),
-        ToolCall::ScrapeUrl { url } => format!("scrape_url: {}", url),
+        ToolCall::McpToolCall { server, name, .. } => format!("mcp_tool: {}/{}", server, name),
     };
 
     let status = if success { "SUCCESS" } else { "FAILED" };
@@ -82,14 +85,14 @@ pub fn format_tool_result(call: &ToolCall, output: &str, success: bool) -> Strin
 }
 
 /// Build the system prompt that teaches the LLM how to use tools
-pub fn build_tool_system_prompt(role: crate::tui::app::AgentRole) -> String {
+pub fn build_tool_system_prompt(role: crate::tui::app::AgentRole, mcp_tools: &std::collections::HashMap<String, crate::agent::mcp::McpToolDef>) -> String {
     let persona = match role {
         crate::tui::app::AgentRole::Chat => "You are an intelligent assistant with access to powerful tools. You can execute actions by outputting structured JSON blocks wrapped in ```tool fences.",
         crate::tui::app::AgentRole::Plan => "You are a software Architect and Planner. Your goal is to explore the codebase and write detailed Markdown implementation plans. Do NOT write code files or run modifying commands. Rely heavily on read_file and search_files. You can execute actions by outputting structured JSON blocks wrapped in ```tool fences.",
         crate::tui::app::AgentRole::Build => "You are a Builder. Your goal is to aggressively implement features. Do not ask for permission to write code or run commands; just use the write_file and run_command tools to get the job done quickly. You can execute actions by outputting structured JSON blocks wrapped in ```tool fences.",
     };
 
-    format!(r#"{}
+    let mut prompt = format!(r#"{}
 
 ## Available Tools
 
@@ -112,28 +115,42 @@ Execute any terminal/shell command:
 ```
 
 ### 4. Search Files
-Search the workspace for text using ripgrep semantics:
+Search for text patterns in workspace files:
 ```tool
-{{"tool": "search_files", "query": "struct App", "file_pattern": "*.rs"}}
+{{"tool": "search_files", "query": "search term", "file_pattern": "*.rs"}}
 ```
 
-### 5. Scrape URL
-Fetch a URL and extract its text content (useful for reading docs or web pages):
-```tool
-{{"tool": "scrape_url", "url": "https://docs.rs"}}
-```
-
-### 6. Web Search
+### 5. Web Search
 Search the internet for information:
 ```tool
 {{"tool": "web_search", "query": "search query here"}}
 ```
+"#, persona);
 
+    if !mcp_tools.is_empty() {
+        prompt.push_str("\n### External MCP Tools\n");
+        for (i, (server, tool)) in mcp_tools.iter().enumerate() {
+            prompt.push_str(&format!(
+                "#### 6.{} {} ({})\n{}\n```tool\n{{\"tool\": \"mcp_tool\", \"server\": \"{}\", \"name\": \"{}\", \"args\": {}}}\n```\n",
+                i + 1,
+                tool.name,
+                server,
+                tool.description,
+                server,
+                tool.name,
+                tool.input_schema
+            ));
+        }
+    }
+
+    prompt.push_str(r#"
 ## Rules
 - You can use multiple tools in a single response
 - Each tool call must be in its own ```tool block
 - The user will see a confirmation prompt before any tool is executed
 - Tool results will be returned to you so you can use them in your response
 - For file paths, use absolute paths when possible
-- When editing files, always read them first to understand the current content"#, persona)
+- When editing files, always read them first to understand the current content"#);
+
+    prompt
 }

@@ -93,9 +93,9 @@ pub async fn run(start_config: bool) -> Result<()> {
                                 app.quit().await?;
                                 break;
                             }
-                            // Mode cycle: Low → High → Ultra → Low (Ctrl+M)
+                            // Thinking Mode toggle (Ctrl+M)
                             (KeyCode::Char('m'), KeyModifiers::CONTROL) => {
-                                app.cycle_mode();
+                                app.toggle_thinking_mode();
                             }
                             // Agent Role cycle: Chat → Plan → Build → Chat (Ctrl+R)
                             (KeyCode::Char('r'), KeyModifiers::CONTROL) => {

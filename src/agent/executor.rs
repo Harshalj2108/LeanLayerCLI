@@ -19,6 +19,23 @@ pub enum ExecutionStatus {
     Failed(String),
 }
 
+pub async fn execute_mcp_tool(
+    mcp_clients: &std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<crate::agent::mcp::McpClient>>>,
+    server: &str,
+    name: &str,
+    args: serde_json::Value
+) -> Result<ExecutionStatus> {
+    if let Some(client) = mcp_clients.get(server) {
+        let client = client.lock().await;
+        match client.call_tool(name, args).await {
+            Ok(output) => Ok(ExecutionStatus::Completed { stdout: output, stderr: String::new(), exit_code: 0 }),
+            Err(e) => Ok(ExecutionStatus::Failed(e.to_string())),
+        }
+    } else {
+        Ok(ExecutionStatus::Failed(format!("MCP Server '{}' not found", server)))
+    }
+}
+
 /// Run a command in a sandboxed subprocess, returning captured output
 pub fn execute_code(req: &ExecutionRequest) -> Result<ExecutionStatus> {
     let (program, args): (&str, Vec<&str>) = match req.language.as_str() {
@@ -145,31 +162,7 @@ pub fn write_file_global(path: &str, content: &str) -> Result<ExecutionStatus> {
     }
 }
 
-/// Fetch a URL and convert its HTML content to Markdown
-pub async fn execute_web_scrape(url: &str) -> Result<ExecutionStatus> {
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-        .build()?;
-        
-    match client.get(url).send().await {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return Ok(ExecutionStatus::Failed(format!("HTTP Error: {}", resp.status())));
-            }
-            if let Ok(html) = resp.text().await {
-                let markdown = html2md::parse_html(&html);
-                Ok(ExecutionStatus::Completed {
-                    stdout: markdown,
-                    stderr: "".into(),
-                    exit_code: 0,
-                })
-            } else {
-                Ok(ExecutionStatus::Failed("Failed to read response body".into()))
-            }
-        }
-        Err(e) => Ok(ExecutionStatus::Failed(format!("Request failed: {}", e))),
-    }
-}
+
 
 /// Execute a web search using DuckDuckGo HTML interface (no API key required)
 pub async fn execute_web_search(query: &str) -> Result<ExecutionStatus> {

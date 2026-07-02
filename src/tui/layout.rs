@@ -218,10 +218,10 @@ fn draw_input(f: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_status(f: &mut Frame, app: &App, area: Rect) {
-    let (mode_str, mode_color_bg, mode_color_fg) = match app.mode {
-        super::app::AppMode::Low => (app.mode.label(), BASE, GREEN),
-        super::app::AppMode::High => (app.mode.label(), BASE, YELLOW),
-        super::app::AppMode::Ultra => (app.mode.label(), BASE, MAUVE),
+    let (mode_str, mode_color_bg, mode_color_fg) = if app.thinking_mode {
+        (" THINK ", BASE, MAUVE)
+    } else {
+        (" STD ", BASE, GREEN)
     };
 
     let (role_str, role_color) = match app.role {
@@ -592,6 +592,8 @@ fn draw_modal(f: &mut Frame, app: &App) {
             ]);
             f.render_widget(Paragraph::new(footer), vertical_layout[1]);
         }
+        super::app::ModalState::ProviderSelection { .. } => {}
+        super::app::ModalState::ModelSelection { .. } => {}
     }
 }
 

@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use super::protocol::{BackendMessage, ChatMessage};
 use super::ratelimit::RateLimiterHandle;
 use crate::config::Config;
-use crate::tui::app::AppMode;
+
 
 pub struct Backend {
     pub base_url: String,
@@ -30,7 +30,6 @@ impl Backend {
         let api_key = crate::config::resolve_api_key(cfg);
         let api_model = cfg.api_model.clone();
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         let rate_limiter = RateLimiterHandle::new(40);
@@ -260,18 +259,17 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        mode: AppMode,
-    ) -> tokio::task::JoinHandle<()> {
+        thinking: bool,
+    ) {
         match self.api_provider.as_str() {
-            "local" => self.send_local(messages, tx, mode),
-            "openai" | "openrouter" | "nvidia" => self.send_openai_compat(messages, tx, mode),
-            "gemini" => self.send_gemini(messages, tx, mode),
-            "anthropic" => self.send_anthropic(messages, tx, mode),
+            "local" => self.send_local(messages, tx, thinking),
+            "openai" | "openrouter" | "nvidia" => self.send_openai_compat(messages, tx, thinking),
+            "gemini" => self.send_gemini(messages, tx, thinking),
+            "anthropic" => self.send_anthropic(messages, tx, thinking),
             _ => {
                 tx.send(BackendMessage::Error {
                     message: format!("Unknown API provider: {}", self.api_provider),
                 }).ok();
-                tokio::spawn(async move {})
             }
         }
     }
@@ -280,15 +278,13 @@ impl Backend {
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        mode: AppMode,
-    ) -> tokio::task::JoinHandle<()> {
+        thinking: bool,
+    ) {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let serialized_messages = serialize_messages_openai(&messages);
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let temperature = mode.temperature();
-        let thinking = mode.thinking_enabled();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("local").await;
 
@@ -296,7 +292,7 @@ impl Backend {
                 "model": "local",
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": temperature,
+                "temperature": if thinking { 0.7 } else { 0.6 },
                 "top_p": 0.95,
                 "chat_template_kwargs": {
                     "enable_thinking": thinking
@@ -304,15 +300,15 @@ impl Backend {
             });
 
             stream_openai_response(&client, &url, body, None, tx).await;
-        })
+        });
     }
 
     fn send_openai_compat(
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        mode: AppMode,
-    ) -> tokio::task::JoinHandle<()> {
+        thinking: bool,
+    ) {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let model = self.api_model.clone().unwrap_or_else(|| "gpt-4o".into());
         let api_key = self.api_key.clone();
@@ -321,7 +317,6 @@ impl Backend {
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
         let provider = self.api_provider.clone();
-        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait(&provider).await;
 
@@ -329,27 +324,26 @@ impl Backend {
                 "model": model,
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": temperature,
+                "temperature": if thinking { 0.7 } else { 0.6 },
             });
 
             let api_key_ref = api_key.as_deref();
             stream_openai_response(&client, &url, body, api_key_ref, tx).await;
-        })
+        });
     }
 
     fn send_gemini(
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        mode: AppMode,
-    ) -> tokio::task::JoinHandle<()> {
+        thinking: bool,
+    ) {
         let model = self.api_model.clone().unwrap_or_else(|| "gemini-2.5-flash".into());
         let api_key = self.api_key.clone();
         let serialized_messages = serialize_messages_openai(&messages);
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("gemini").await;
 
@@ -359,19 +353,19 @@ impl Backend {
                 "model": model,
                 "messages": serialized_messages,
                 "stream": true,
-                "temperature": temperature,
+                "temperature": if thinking { 0.7 } else { 0.6 },
             });
 
             stream_openai_response(&client, url, body, api_key.as_deref(), tx).await;
-        })
+        });
     }
 
     fn send_anthropic(
         &self,
         messages: Vec<ChatMessage>,
         tx: mpsc::UnboundedSender<BackendMessage>,
-        mode: AppMode,
-    ) -> tokio::task::JoinHandle<()> {
+        thinking: bool,
+    ) {
         let model = self.api_model.clone().unwrap_or_else(|| "claude-sonnet-4-20250514".into());
         let api_key = self.api_key.clone().unwrap_or_default();
         let url = format!("{}/v1/messages", self.base_url);
@@ -427,7 +421,6 @@ impl Backend {
 
         let client = self.client.clone();
         let rate_limiter = self.rate_limiter.clone();
-        let temperature = mode.temperature();
         tokio::spawn(async move {
             rate_limiter.check_and_wait("anthropic").await;
 
@@ -436,7 +429,7 @@ impl Backend {
                 "messages": anthropic_messages,
                 "stream": true,
                 "max_tokens": 8192,
-                "temperature": temperature,
+                "temperature": if thinking { 0.7 } else { 0.6 },
             });
             if !system_text.is_empty() {
                 body["system"] = serde_json::json!(system_text);
@@ -464,7 +457,7 @@ impl Backend {
                     }).ok();
                 }
             }
-        })
+        });
     }
 }
 
@@ -568,8 +561,20 @@ async fn stream_openai_chunks(
     let mut line_buf = String::new();
     let mut in_think = false;
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let mut token_count = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                if token_count > 0 {
+                    tx.send(BackendMessage::Done).ok();
+                    return Ok(());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         let s = String::from_utf8_lossy(&chunk);
         
         for ch in s.chars() {
@@ -604,6 +609,7 @@ async fn stream_openai_chunks(
                             }
                         }
                         if !text.is_empty() {
+                            token_count += 1;
                             tx.send(BackendMessage::Token {
                                 content: text,
                             }).ok();
@@ -616,6 +622,7 @@ async fn stream_openai_chunks(
             }
         }
     }
+    tx.send(BackendMessage::Done).ok();
     Ok(())
 }
 
@@ -627,8 +634,20 @@ async fn stream_anthropic_response(
     let mut stream = resp.bytes_stream();
     let mut line_buf = String::new();
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
+    let mut token_count = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = match chunk_res {
+            Ok(c) => c,
+            Err(e) => {
+                if token_count > 0 {
+                    tx.send(BackendMessage::Done).ok();
+                    return Ok(());
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         let s = String::from_utf8_lossy(&chunk);
         
         for ch in s.chars() {
@@ -649,6 +668,7 @@ async fn stream_anthropic_response(
                             if let Some(delta) = chunk.get("delta") {
                                 if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                                     if !text.is_empty() {
+                                        token_count += 1;
                                         tx.send(BackendMessage::Token {
                                             content: text.to_string(),
                                         }).ok();
@@ -669,6 +689,7 @@ async fn stream_anthropic_response(
             }
         }
     }
+    tx.send(BackendMessage::Done).ok();
     Ok(())
 }
 

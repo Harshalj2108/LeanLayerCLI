@@ -1,7 +1,6 @@
 use anyhow::Result;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind, KeyModifiers};
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tui_textarea::TextArea;
 use arboard::Clipboard;
 
@@ -23,42 +22,7 @@ pub enum Focus {
     Graph,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum AppMode {
-    Low,
-    High,
-    Ultra,
-}
 
-impl AppMode {
-    pub fn cycle(self) -> Self {
-        match self {
-            AppMode::Low => AppMode::High,
-            AppMode::High => AppMode::Ultra,
-            AppMode::Ultra => AppMode::Low,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            AppMode::Low => " LOW ",
-            AppMode::High => " HIGH ",
-            AppMode::Ultra => " ULTRA ",
-        }
-    }
-
-    pub fn temperature(self) -> f32 {
-        match self {
-            AppMode::Low => 0.3,
-            AppMode::High => 0.6,
-            AppMode::Ultra => 0.8,
-        }
-    }
-
-    pub fn thinking_enabled(self) -> bool {
-        matches!(self, AppMode::Ultra)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AgentRole {
@@ -126,6 +90,14 @@ pub enum ModalState {
         diff: String,
         proposed_content: String,
     },
+    ProviderSelection {
+        providers: Vec<String>,
+        selected_index: usize,
+    },
+    ModelSelection {
+        models: Vec<String>,
+        selected_index: usize,
+    },
 }
 
 pub struct App<'a> {
@@ -138,7 +110,7 @@ pub struct App<'a> {
     pub status: String,
     pub should_quit: bool,
     pub graph: MemoryGraph,
-    pub mode: AppMode,
+    pub thinking_mode: bool,
     pub backend: Backend,
     pub scroll: usize,
     pub graph_scroll: usize,
@@ -153,9 +125,12 @@ pub struct App<'a> {
     pub token_count: usize,
     bpe: Option<tiktoken_rs::CoreBPE>,
     clipboard: Option<Clipboard>,
-    pub backend_task: Option<JoinHandle<()>>,
+    pub backend_task: Option<tokio::task::JoinHandle<()>>,
     pub pinned_files: std::collections::HashSet<String>,
     pub role: AgentRole,
+    pub history_token_count: usize,
+    pub mcp_clients: std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<crate::agent::mcp::McpClient>>>,
+    pub mcp_tools: std::collections::HashMap<String, crate::agent::mcp::McpToolDef>,
 }
 
 impl<'a> App<'a> {
@@ -167,7 +142,8 @@ impl<'a> App<'a> {
         let mut messages = Vec::new();
 
         // Inject tool-calling system prompt
-        let tool_prompt = crate::agent::tools::build_tool_system_prompt(crate::tui::app::AgentRole::Chat);
+        let mcp_tools = std::collections::HashMap::new();
+        let tool_prompt = crate::agent::tools::build_tool_system_prompt(crate::tui::app::AgentRole::Chat, &mcp_tools);
         messages.push(ChatMessage {
             role: "system".into(),
             content: tool_prompt,
@@ -187,8 +163,8 @@ impl<'a> App<'a> {
         input.set_cursor_line_style(ratatui::style::Style::default());
         input.set_placeholder_text(" Type your message here... (Enter to submit, Shift+Enter for newline, Ctrl+V to paste)");
 
-        Ok(Self {
-            cfg,
+        let mut app_inst = Self {
+            cfg: cfg.clone(),
             messages,
             input,
             focus: Focus::Chat,
@@ -197,7 +173,7 @@ impl<'a> App<'a> {
             status: "Ready".into(),
             should_quit: false,
             graph,
-            mode: AppMode::High,
+            thinking_mode: false,
             backend,
             scroll: 0,
             graph_scroll: 0,
@@ -215,7 +191,31 @@ impl<'a> App<'a> {
             backend_task: None,
             pinned_files: std::collections::HashSet::new(),
             role: AgentRole::Chat,
-        })
+            history_token_count: 0,
+            mcp_clients: std::collections::HashMap::new(),
+            mcp_tools,
+        };
+        
+        // Spawn configured MCP servers
+        for (name, srv_cfg) in &cfg.mcp_servers {
+            if let Ok(client) = crate::agent::mcp::McpClient::spawn(name, srv_cfg).await {
+                if let Ok(tools) = client.list_tools().await {
+                    for tool in tools {
+                        let key = format!("{}:{}", name, tool.name);
+                        app_inst.mcp_tools.insert(key, tool);
+                    }
+                }
+                app_inst.mcp_clients.insert(name.to_string(), std::sync::Arc::new(tokio::sync::Mutex::new(client)));
+            }
+        }
+        
+        // Rebuild tool prompt in case tools were added
+        let new_prompt = crate::agent::tools::build_tool_system_prompt(app_inst.role, &app_inst.mcp_tools);
+        if let Some(sys) = app_inst.messages.iter_mut().find(|m| m.role == "system") {
+            sys.content = new_prompt;
+        }
+
+        Ok(app_inst)
     }
 
     pub fn toggle_focus(&mut self) {
@@ -225,15 +225,15 @@ impl<'a> App<'a> {
         };
     }
 
-    pub fn cycle_mode(&mut self) {
-        self.mode = self.mode.cycle();
+    pub fn toggle_thinking_mode(&mut self) {
+        self.thinking_mode = !self.thinking_mode;
     }
 
     pub fn cycle_role(&mut self) {
         self.role = self.role.cycle();
         self.status = format!("Agent role: {}", self.role.label().trim());
 
-        let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role);
+        let new_prompt = crate::agent::tools::build_tool_system_prompt(self.role, &self.mcp_tools);
         if let Some(sys) = self.messages.iter_mut().find(|m| m.role == "system") {
             sys.content = new_prompt;
         }
@@ -319,8 +319,8 @@ impl<'a> App<'a> {
                                     crate::agent::tools::ToolCall::WebSearch { query } => {
                                         crate::agent::executor::execute_web_search(query).await
                                     }
-                                    crate::agent::tools::ToolCall::ScrapeUrl { url } => {
-                                        crate::agent::executor::execute_web_scrape(url).await
+                                    crate::agent::tools::ToolCall::McpToolCall { server, name, args } => {
+                                        crate::agent::executor::execute_mcp_tool(&self.mcp_clients, server, name, args.clone()).await
                                     }
                                 };
                                 
@@ -389,8 +389,8 @@ impl<'a> App<'a> {
                             content: format!("⚠️ **API Error**:\n\n{}", message),
                             images: None,
                         });
+                        self.is_generating = false;
                         self.status = "API Error".into();
-                        self.status = "Ready".into();
                         self.token_rx = None;
                         break;
                     }
@@ -499,9 +499,9 @@ impl<'a> App<'a> {
                                     self.status = format!("Searching the web: {}...", query);
                                     crate::agent::executor::execute_web_search(query).await
                                 }
-                                crate::agent::tools::ToolCall::ScrapeUrl { url } => {
-                                    self.status = format!("Scraping URL: {}...", url);
-                                    crate::agent::executor::execute_web_scrape(url).await
+                                crate::agent::tools::ToolCall::McpToolCall { server, name, args } => {
+                                    self.status = format!("Calling MCP {}/{}...", server, name);
+                                    crate::agent::executor::execute_mcp_tool(&self.mcp_clients, server, name, args.clone()).await
                                 }
                             };
                             
@@ -839,6 +839,12 @@ impl<'a> App<'a> {
                         _ => {}
                     }
                 }
+                ModalState::ProviderSelection { .. } => {
+                    self.active_modal = None;
+                }
+                ModalState::ModelSelection { .. } => {
+                    self.active_modal = None;
+                }
             }
             return Ok(());
         }
@@ -1041,6 +1047,44 @@ impl<'a> App<'a> {
         new_input.set_placeholder_text(" Type your message here... (Enter to submit, Shift+Enter for newline, Ctrl+V to paste)");
         self.input = new_input;
 
+        if content.starts_with("/mcp ") {
+            let parts: Vec<&str> = content.split_whitespace().collect();
+            if parts.len() >= 3 && parts[1] == "add" {
+                let name = parts[2].to_string();
+                let command = parts[3].to_string();
+                let args = parts[4..].iter().map(|s| s.to_string()).collect();
+                let mut cfg = self.cfg.clone();
+                cfg.mcp_servers.insert(name.clone(), crate::config::McpServerConfig {
+                    command,
+                    args,
+                    env: std::collections::HashMap::new(),
+                });
+                
+                self.messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: format!("Adding MCP server '{}'. Restart required for tools to become active.", name),
+                    images: None,
+                });
+                
+                let _ = crate::config::save(&cfg);
+                self.cfg = cfg;
+                return Ok(());
+            } else if parts.len() == 3 && parts[1] == "remove" {
+                let name = parts[2].to_string();
+                let mut cfg = self.cfg.clone();
+                if cfg.mcp_servers.remove(&name).is_some() {
+                    self.messages.push(ChatMessage {
+                        role: "user".into(),
+                        content: format!("Removed MCP server '{}'. Restart required to clear tools.", name),
+                        images: None,
+                    });
+                    let _ = crate::config::save(&cfg);
+                    self.cfg = cfg;
+                }
+                return Ok(());
+            }
+        }
+
         // Enhancement #2: Concept RAG — inject relevant vault knowledge
         let concept_context = self.graph.build_concept_context(&content);
         if !concept_context.is_empty() {
@@ -1105,8 +1149,8 @@ impl<'a> App<'a> {
             }
         }
 
-        let handle = self.backend.send_generate(req_messages, tx, self.mode);
-        self.backend_task = Some(handle);
+        self.backend.send_generate(req_messages, tx, self.thinking_mode);
+        self.backend_task = None; // No JoinHandle returned anymore
 
         Ok(())
     }
