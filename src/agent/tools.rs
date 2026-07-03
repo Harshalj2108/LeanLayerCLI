@@ -1,5 +1,161 @@
 #![allow(dead_code)]
+use std::time::Duration;
+
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+
+use crate::agent::errors::AgentError;
+use crate::agent::workspace::Workspace;
+
+#[async_trait]
+pub trait Tool: Send + Sync {
+    fn name(&self) -> &'static str;
+    fn schema(&self) -> serde_json::Value;
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        workspace: &Workspace,
+    ) -> std::result::Result<serde_json::Value, AgentError>;
+}
+
+pub struct BashTool;
+
+#[async_trait]
+impl Tool for BashTool {
+    fn name(&self) -> &'static str {
+        "bash"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["command"],
+            "properties": {
+                "command": {"type": "string"},
+                "working_dir": {"type": "string"}
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        workspace: &Workspace,
+    ) -> std::result::Result<serde_json::Value, AgentError> {
+        let command = args
+            .get("command")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| AgentError::Tool("missing command".to_string()))?;
+        let working_dir = args
+            .get("working_dir")
+            .and_then(|value| value.as_str())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| workspace.base_path().to_path_buf());
+        let working_dir = workspace.normalize_and_verify(&working_dir)?;
+
+        #[cfg(windows)]
+        let mut child = {
+            let mut cmd = tokio::process::Command::new("cmd");
+            cmd.args(["/C", command]);
+            cmd
+        };
+
+        #[cfg(not(windows))]
+        let mut child = {
+            let mut cmd = tokio::process::Command::new("sh");
+            cmd.args(["-c", command]);
+            cmd
+        };
+
+        child
+            .current_dir(working_dir)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true);
+
+        let output = tokio::time::timeout(Duration::from_secs(10), child.output())
+            .await
+            .map_err(|_| AgentError::Tool("bash command timed out after 10s".to_string()))?
+            .map_err(AgentError::Ipc)?;
+
+        Ok(serde_json::json!({
+            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stderr": String::from_utf8_lossy(&output.stderr),
+            "exit_code": output.status.code().unwrap_or(-1),
+            "success": output.status.success()
+        }))
+    }
+}
+
+pub struct FsReadTool;
+
+#[async_trait]
+impl Tool for FsReadTool {
+    fn name(&self) -> &'static str {
+        "fs_read"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string"}}
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        workspace: &Workspace,
+    ) -> std::result::Result<serde_json::Value, AgentError> {
+        let path = args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| AgentError::Tool("missing path".to_string()))?;
+        let contents = workspace.read_file(std::path::Path::new(path)).await?;
+        Ok(serde_json::json!({ "contents": contents }))
+    }
+}
+
+pub struct FsWriteTool;
+
+#[async_trait]
+impl Tool for FsWriteTool {
+    fn name(&self) -> &'static str {
+        "fs_write"
+    }
+
+    fn schema(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "required": ["path", "contents"],
+            "properties": {
+                "path": {"type": "string"},
+                "contents": {"type": "string"}
+            }
+        })
+    }
+
+    async fn execute(
+        &self,
+        args: serde_json::Value,
+        workspace: &Workspace,
+    ) -> std::result::Result<serde_json::Value, AgentError> {
+        let path = args
+            .get("path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| AgentError::Tool("missing path".to_string()))?;
+        let contents = args
+            .get("contents")
+            .and_then(|value| value.as_str())
+            .or_else(|| args.get("content").and_then(|value| value.as_str()))
+            .ok_or_else(|| AgentError::Tool("missing contents".to_string()))?;
+        workspace
+            .write_file_atomic(std::path::Path::new(path), contents)
+            .await?;
+        Ok(serde_json::json!({ "written": true }))
+    }
+}
 
 /// Enhancement #11: Structured tool-calling schemas for the LLM
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -153,4 +309,43 @@ Search the internet for information:
 - When editing files, always read them first to understand the current content"#);
 
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BashTool, FsReadTool, FsWriteTool, Tool};
+    use crate::agent::workspace::Workspace;
+
+    #[tokio::test]
+    async fn fs_read_and_write_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        FsWriteTool
+            .execute(
+                serde_json::json!({"path": "sample.txt", "contents": "sample"}),
+                &workspace,
+            )
+            .await
+            .expect("write");
+        let read = FsReadTool
+            .execute(serde_json::json!({"path": "sample.txt"}), &workspace)
+            .await
+            .expect("read");
+        assert_eq!(read["contents"], "sample");
+    }
+
+    #[tokio::test]
+    async fn bash_tool_times_out_slow_command() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        #[cfg(windows)]
+        let command = "powershell -NoProfile -Command Start-Sleep -Seconds 20";
+        #[cfg(not(windows))]
+        let command = "sleep 20";
+
+        let result = BashTool
+            .execute(serde_json::json!({"command": command}), &workspace)
+            .await;
+        assert!(result.is_err());
+    }
 }

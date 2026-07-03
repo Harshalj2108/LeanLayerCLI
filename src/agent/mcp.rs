@@ -1,13 +1,99 @@
 use anyhow::{anyhow, Result};
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{mpsc, oneshot, Mutex};
 use std::process::Stdio;
+
+use crate::agent::errors::AgentError;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct McpRequest {
+    pub jsonrpc: String,
+    pub id: usize,
+    pub method: String,
+    pub params: Value,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct McpErrorBody {
+    pub code: i64,
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct McpResponse {
+    pub jsonrpc: String,
+    pub id: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<McpErrorBody>,
+}
+
+pub struct McpSession {
+    pub request_id: AtomicUsize,
+    pub pending: DashMap<usize, oneshot::Sender<McpResponse>>,
+}
+
+impl Default for McpSession {
+    fn default() -> Self {
+        Self {
+            request_id: AtomicUsize::new(1),
+            pending: DashMap::new(),
+        }
+    }
+}
+
+impl McpSession {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn send_request<T: Serialize>(
+        &self,
+        method: &str,
+        params: T,
+        writer: &mut ChildStdin,
+    ) -> std::result::Result<oneshot::Receiver<McpResponse>, AgentError> {
+        let id = self.request_id.fetch_add(1, Ordering::SeqCst);
+        let request = McpRequest {
+            jsonrpc: "2.0".to_string(),
+            id,
+            method: method.to_string(),
+            params: serde_json::to_value(params)?,
+        };
+
+        let (tx, rx) = oneshot::channel();
+        self.pending.insert(id, tx);
+
+        let mut encoded = serde_json::to_vec(&request)?;
+        encoded.push(b'\n');
+        if let Err(err) = writer.write_all(&encoded).await {
+            self.pending.remove(&id);
+            return Err(AgentError::Ipc(err));
+        }
+        writer.flush().await.map_err(AgentError::Ipc)?;
+        Ok(rx)
+    }
+
+    pub fn handle_incoming(&self, response: McpResponse) -> std::result::Result<(), AgentError> {
+        match self.pending.remove(&response.id) {
+            Some((_, sender)) => sender
+                .send(response)
+                .map_err(|_| AgentError::Mcp("request receiver dropped".to_string())),
+            None => Err(AgentError::Mcp(format!(
+                "no pending request for id {}",
+                response.id
+            ))),
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct JsonRpcRequest {
@@ -15,6 +101,30 @@ pub struct JsonRpcRequest {
     pub id: u64,
     pub method: String,
     pub params: Option<Value>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{McpResponse, McpSession};
+
+    #[tokio::test]
+    async fn handle_incoming_resolves_pending_receiver() {
+        let session = McpSession::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.pending.insert(1, tx);
+
+        session
+            .handle_incoming(McpResponse {
+                jsonrpc: "2.0".to_string(),
+                id: 1,
+                result: Some(serde_json::json!({"ok": true})),
+                error: None,
+            })
+            .expect("route response");
+
+        let response = rx.await.expect("response");
+        assert_eq!(response.result.expect("result")["ok"], true);
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]

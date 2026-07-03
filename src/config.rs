@@ -2,6 +2,58 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::memory::errors::MemoryError;
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq)]
+pub struct AppConfig {
+    #[serde(default = "default_max_context_tokens")]
+    pub max_context_tokens: usize,
+    #[serde(default = "default_workspace_root")]
+    pub workspace_root: std::path::PathBuf,
+    #[serde(default = "default_auto_summarize")]
+    pub auto_summarize: bool,
+}
+
+fn default_max_context_tokens() -> usize {
+    32_000
+}
+
+fn default_workspace_root() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+}
+
+fn default_auto_summarize() -> bool {
+    true
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            max_context_tokens: default_max_context_tokens(),
+            workspace_root: default_workspace_root(),
+            auto_summarize: default_auto_summarize(),
+        }
+    }
+}
+
+impl AppConfig {
+    pub async fn load_or_default(path: &std::path::Path) -> std::result::Result<Self, MemoryError> {
+        match tokio::fs::read_to_string(path).await {
+            Ok(contents) => Ok(toml::from_str(&contents)?),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(MemoryError::Io(err)),
+        }
+    }
+
+    pub async fn save(&self, path: &std::path::Path) -> std::result::Result<(), MemoryError> {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(path, toml::to_string_pretty(self)?).await?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     #[serde(default = "default_model_path")]
@@ -162,4 +214,22 @@ pub fn resolve_api_key(cfg: &Config) -> Option<String> {
     };
 
     std::env::var(env_var).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[tokio::test]
+    async fn app_config_missing_keys_fallback_to_defaults() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        tokio::fs::write(&path, "max_context_tokens = 1000\n")
+            .await
+            .expect("write");
+        let cfg = AppConfig::load_or_default(&path).await.expect("load");
+        assert_eq!(cfg.max_context_tokens, 1000);
+        assert!(cfg.auto_summarize);
+        assert!(!cfg.workspace_root.as_os_str().is_empty());
+    }
 }

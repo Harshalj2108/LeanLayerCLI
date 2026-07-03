@@ -1,5 +1,9 @@
 use anyhow::Result;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseEvent, MouseEventKind, KeyModifiers};
+use futures_util::StreamExt;
+use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use tokio::sync::mpsc;
 use tui_textarea::TextArea;
 use arboard::Clipboard;
@@ -16,6 +20,32 @@ use crate::memory::{
     vault::VaultWriter,
 };
 use crate::agent::workspace::{WorkspaceFile, GitStatus};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputMode {
+    Normal,
+    Editing,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphNode {
+    pub label: String,
+    pub metadata: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AgentMessage {
+    Status(String),
+    Token(String),
+    Done,
+    GraphNodes(Vec<GraphNode>),
+}
+
+pub enum AppEvent {
+    Tick,
+    KeyPress(KeyEvent),
+    AgentUpdate(AgentMessage),
+}
 
 pub enum Focus {
     Chat,
@@ -101,6 +131,10 @@ pub enum ModalState {
 }
 
 pub struct App<'a> {
+    pub input_mode: InputMode,
+    pub input_buffer: String,
+    pub is_processing: bool,
+    pub graph_nodes: Vec<GraphNode>,
     pub cfg: Config,
     pub messages: Vec<ChatMessage>,
     pub input: TextArea<'a>,
@@ -164,6 +198,10 @@ impl<'a> App<'a> {
         input.set_placeholder_text(" Type your message here... (Enter to submit, Shift+Enter for newline, Ctrl+V to paste)");
 
         let mut app_inst = Self {
+            input_mode: InputMode::Editing,
+            input_buffer: String::new(),
+            is_processing: false,
+            graph_nodes: Vec::new(),
             cfg: cfg.clone(),
             messages,
             input,
@@ -216,6 +254,41 @@ impl<'a> App<'a> {
         }
 
         Ok(app_inst)
+    }
+
+    pub async fn run(
+        terminal: &mut ratatui::Terminal<CrosstermBackend<std::io::Stdout>>,
+        mut app: App<'a>,
+        ui_tx: mpsc::Sender<String>,
+        mut agent_rx: mpsc::Receiver<AgentMessage>,
+    ) -> color_eyre::Result<()> {
+        let mut reader = EventStream::new();
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+
+        loop {
+            let event = tokio::select! {
+                maybe_event = reader.next() => {
+                    match maybe_event {
+                        Some(Ok(Event::Key(key))) => AppEvent::KeyPress(key),
+                        Some(Ok(_)) => AppEvent::Tick,
+                        Some(Err(err)) => return Err(color_eyre::eyre::eyre!(err)),
+                        None => return Ok(()),
+                    }
+                }
+                _ = tick.tick() => AppEvent::Tick,
+                agent_message = agent_rx.recv() => {
+                    match agent_message {
+                        Some(message) => AppEvent::AgentUpdate(message),
+                        None => AppEvent::Tick,
+                    }
+                }
+            };
+
+            if apply_epic_event(&mut app, event, &ui_tx).await? {
+                return Ok(());
+            }
+            terminal.draw(|f| crate::tui::layout::render(f, &app))?;
+        }
     }
 
     pub fn toggle_focus(&mut self) {
@@ -1291,6 +1364,163 @@ impl<'a> App<'a> {
         }
 
         images
+    }
+}
+
+async fn apply_epic_event<'a>(
+    app: &mut App<'a>,
+    event: AppEvent,
+    ui_tx: &mpsc::Sender<String>,
+) -> color_eyre::Result<bool> {
+    match event {
+        AppEvent::Tick => {}
+        AppEvent::KeyPress(key) => {
+            if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(true);
+            }
+            apply_text_input_event(&mut app.input_mode, &mut app.input_buffer, key);
+            if key.code == KeyCode::Enter && app.input_mode == InputMode::Editing {
+                let prompt = app.input_buffer.trim().to_string();
+                if !prompt.is_empty() {
+                    ui_tx.send(prompt.clone()).await.map_err(|_| {
+                        color_eyre::eyre::eyre!("failed to send prompt to agent executor")
+                    })?;
+                    app.messages.push(ChatMessage {
+                        role: "user".to_string(),
+                        content: prompt,
+                        images: None,
+                    });
+                    app.input_buffer.clear();
+                    app.is_processing = true;
+                }
+            }
+        }
+        AppEvent::AgentUpdate(message) => match message {
+            AgentMessage::Status(status) => app.status = status,
+            AgentMessage::Token(token) => {
+                app.current_response.push_str(&token);
+                app.is_processing = true;
+            }
+            AgentMessage::Done => {
+                if !app.current_response.is_empty() {
+                    app.messages.push(ChatMessage {
+                        role: "assistant".to_string(),
+                        content: app.current_response.clone(),
+                        images: None,
+                    });
+                    app.current_response.clear();
+                }
+                app.is_processing = false;
+            }
+            AgentMessage::GraphNodes(nodes) => app.graph_nodes = nodes,
+        },
+    }
+    Ok(false)
+}
+
+fn apply_text_input_event(mode: &mut InputMode, buffer: &mut String, key: KeyEvent) {
+    match key.code {
+        KeyCode::Esc => *mode = InputMode::Normal,
+        KeyCode::Char('i') if *mode == InputMode::Normal => *mode = InputMode::Editing,
+        KeyCode::Char(ch) if *mode == InputMode::Editing => buffer.push(ch),
+        KeyCode::Backspace if *mode == InputMode::Editing => {
+            buffer.pop();
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+impl App<'static> {
+    pub(crate) fn test_fixture() -> Self {
+        let cfg = Config::default();
+        let mut input = TextArea::default();
+        input.set_cursor_line_style(ratatui::style::Style::default());
+        Self {
+            input_mode: InputMode::Editing,
+            input_buffer: "hello".to_string(),
+            is_processing: false,
+            graph_nodes: vec![GraphNode {
+                label: "src/main.rs".to_string(),
+                metadata: "file".to_string(),
+            }],
+            cfg: cfg.clone(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+                images: None,
+            }],
+            input,
+            focus: Focus::Chat,
+            is_generating: false,
+            current_response: String::new(),
+            status: "Ready".to_string(),
+            should_quit: false,
+            graph: MemoryGraph {
+                nodes: std::collections::HashMap::new(),
+                vault_path: std::path::PathBuf::from(&cfg.vault_path),
+            },
+            thinking_mode: false,
+            backend: Backend {
+                base_url: "http://127.0.0.1:8081".to_string(),
+                child: None,
+                api_provider: "local".to_string(),
+                api_key: None,
+                api_model: None,
+                client: reqwest::Client::new(),
+                rate_limiter: RateLimiterHandle::new(40),
+                actual_ctx_size: 4096,
+            },
+            scroll: 0,
+            graph_scroll: 0,
+            selected_node_index: 0,
+            active_modal: None,
+            token_rx: None,
+            rate_limiter: RateLimiterHandle::new(40),
+            rate_rpm: 0,
+            rate_remaining: 40,
+            rate_max: 40,
+            agent_iteration_count: 0,
+            token_count: 0,
+            bpe: None,
+            clipboard: None,
+            backend_task: None,
+            pinned_files: std::collections::HashSet::new(),
+            role: AgentRole::Chat,
+            history_token_count: 0,
+            mcp_clients: std::collections::HashMap::new(),
+            mcp_tools: std::collections::HashMap::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_text_input_event, InputMode};
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn key_events_update_input_buffer_and_modes() {
+        let mut mode = InputMode::Editing;
+        let mut buffer = String::new();
+        apply_text_input_event(
+            &mut mode,
+            &mut buffer,
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+        );
+        assert_eq!(buffer, "a");
+        apply_text_input_event(
+            &mut mode,
+            &mut buffer,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        );
+        assert_eq!(mode, InputMode::Normal);
+        apply_text_input_event(
+            &mut mode,
+            &mut buffer,
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+        );
+        assert_eq!(buffer, "a");
     }
 }
 

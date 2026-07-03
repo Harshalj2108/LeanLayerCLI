@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-rust:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build release binary
+        run: cargo build --release --bin airllm
+
+      - name: Stage release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist/LeanLayerCLI
+          cp target/release/airllm dist/LeanLayerCLI/
+          cp airllm_backend.py requirements.txt dist/LeanLayerCLI/
+          (cd dist && zip -r "LeanLayerCLI-${{ matrix.os }}.zip" LeanLayerCLI)
+
+      - name: Upload GitHub Release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/LeanLayerCLI-${{ matrix.os }}.zip

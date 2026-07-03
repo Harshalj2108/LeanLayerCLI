@@ -1,6 +1,207 @@
 #![allow(dead_code)]
 use anyhow::Result;
+use std::sync::Arc;
 use std::process::Command;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin};
+use tokio::sync::mpsc;
+
+use crate::agent::errors::AgentError;
+use crate::agent::mcp::{McpResponse, McpSession};
+use crate::agent::tools::{BashTool, FsReadTool, FsWriteTool, Tool};
+use crate::agent::workspace::Workspace;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecutorState {
+    Booting,
+    Idle,
+    AwaitingLlm,
+    ExecutingTool(String),
+    Faulted,
+}
+
+pub struct AgentExecutor {
+    pub state: ExecutorState,
+    pub child_process: Child,
+    pub session: Arc<McpSession>,
+    pub workspace: Workspace,
+    retry_count: usize,
+}
+
+impl AgentExecutor {
+    pub fn new(child_process: Child, session: Arc<McpSession>, workspace: Workspace) -> Self {
+        Self {
+            state: ExecutorState::Booting,
+            child_process,
+            session,
+            workspace,
+            retry_count: 0,
+        }
+    }
+
+    pub async fn run(
+        mut self,
+        mut ui_rx: mpsc::Receiver<String>,
+    ) -> std::result::Result<(), AgentError> {
+        'process: loop {
+            let mut stdin = self.child_process.stdin.take().ok_or_else(|| {
+                AgentError::Ipc(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "agent child stdin is not piped",
+                ))
+            })?;
+            let stdout = self.child_process.stdout.take().ok_or_else(|| {
+                AgentError::Ipc(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "agent child stdout is not piped",
+                ))
+            })?;
+            let mut reader = BufReader::new(stdout).lines();
+            self.state = ExecutorState::Idle;
+
+            loop {
+                tokio::select! {
+                    prompt = ui_rx.recv() => {
+                        let Some(prompt) = prompt else {
+                            return Ok(());
+                        };
+                        self.session
+                            .send_request("prompt", serde_json::json!({ "prompt": prompt }), &mut stdin)
+                            .await?;
+                        self.state = ExecutorState::AwaitingLlm;
+                    }
+                    line = reader.next_line() => {
+                        match line.map_err(AgentError::Ipc)? {
+                            Some(line) => self.handle_stdout_line(&line, &mut stdin).await?,
+                            None => {
+                                self.restart_child_with_backoff().await?;
+                                continue 'process;
+                            }
+                        }
+                    }
+                    status = self.child_process.wait() => {
+                        let status = status.map_err(AgentError::Ipc)?;
+                        if status.success() {
+                            return Ok(());
+                        }
+                        self.restart_child_with_backoff().await?;
+                        continue 'process;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn handle_stdout_line(
+        &mut self,
+        line: &str,
+        stdin: &mut ChildStdin,
+    ) -> std::result::Result<(), AgentError> {
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        if value.get("method").and_then(|method| method.as_str()) == Some("tool/call") {
+            self.handle_tool_call(value, stdin).await?;
+            return Ok(());
+        }
+
+        if value.get("id").is_some() {
+            let response: McpResponse = serde_json::from_value(value)?;
+            self.session.handle_incoming(response)?;
+        }
+
+        Ok(())
+    }
+
+    async fn handle_tool_call(
+        &mut self,
+        request: serde_json::Value,
+        stdin: &mut ChildStdin,
+    ) -> std::result::Result<(), AgentError> {
+        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let params = request
+            .get("params")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let name = params
+            .get("name")
+            .and_then(|name| name.as_str())
+            .ok_or_else(|| AgentError::Tool("tool/call missing params.name".to_string()))?
+            .to_string();
+        let args = params
+            .get("arguments")
+            .cloned()
+            .or_else(|| params.get("args").cloned())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        self.state = ExecutorState::ExecutingTool(name.clone());
+        let workspace = self.workspace.clone();
+        let tool_name = name.clone();
+        let task = tokio::spawn(async move { execute_named_tool(&tool_name, args, &workspace).await });
+        let result = task
+            .await
+            .map_err(|err| AgentError::Tool(err.to_string()))?;
+
+        let response = match result {
+            Ok(result) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": result
+            }),
+            Err(err) => serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32000,
+                    "message": err.to_string()
+                }
+            }),
+        };
+        let mut encoded = serde_json::to_vec(&response)?;
+        encoded.push(b'\n');
+        stdin.write_all(&encoded).await.map_err(AgentError::Ipc)?;
+        stdin.flush().await.map_err(AgentError::Ipc)?;
+        self.state = ExecutorState::AwaitingLlm;
+        Ok(())
+    }
+
+    async fn restart_child_with_backoff(&mut self) -> std::result::Result<(), AgentError> {
+        self.retry_count += 1;
+        if self.retry_count > 3 {
+            self.state = ExecutorState::Faulted;
+            return Err(AgentError::Mcp(
+                "agent backend exited repeatedly; retries exhausted".to_string(),
+            ));
+        }
+
+        let delay = 2_u64.pow((self.retry_count - 1) as u32);
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+        self.child_process = spawn_default_backend()?;
+        self.state = ExecutorState::Booting;
+        Ok(())
+    }
+}
+
+fn spawn_default_backend() -> std::result::Result<Child, AgentError> {
+    tokio::process::Command::new("python")
+        .arg("airllm_backend.py")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(AgentError::Ipc)
+}
+
+async fn execute_named_tool(
+    name: &str,
+    args: serde_json::Value,
+    workspace: &Workspace,
+) -> std::result::Result<serde_json::Value, AgentError> {
+    match name {
+        "bash" | "run_command" => BashTool.execute(args, workspace).await,
+        "fs_read" | "read_file" => FsReadTool.execute(args, workspace).await,
+        "fs_write" | "write_file" => FsWriteTool.execute(args, workspace).await,
+        other => Err(AgentError::Tool(format!("unknown tool: {}", other))),
+    }
+}
 
 /// Enhancement #8: Sandboxed code execution engine
 /// Enhancement #11: Gatekeeper agentic tool calling
@@ -546,4 +747,46 @@ pub fn generate_file_diff(path: &str, original: Option<&str>, proposed: &str) ->
     }
 
     diff
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AgentExecutor, ExecutorState};
+    use crate::agent::mcp::McpSession;
+    use crate::agent::workspace::Workspace;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn state_transitions_cover_prompt_and_tool_execution() {
+        #[cfg(windows)]
+        let mut child = tokio::process::Command::new("cmd")
+            .args(["/C", "more"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("child");
+
+        #[cfg(not(windows))]
+        let mut child = tokio::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("child");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        let mut executor = AgentExecutor::new(child, Arc::new(McpSession::new()), workspace);
+        assert_eq!(executor.state, ExecutorState::Booting);
+        executor.state = ExecutorState::Idle;
+        assert_eq!(executor.state, ExecutorState::Idle);
+        executor.state = ExecutorState::AwaitingLlm;
+        assert_eq!(executor.state, ExecutorState::AwaitingLlm);
+        executor.state = ExecutorState::ExecutingTool("fs_read".to_string());
+        assert_eq!(
+            executor.state,
+            ExecutorState::ExecutingTool("fs_read".to_string())
+        );
+
+        let _ = executor.child_process.kill().await;
+    }
 }

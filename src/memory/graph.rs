@@ -1,7 +1,114 @@
 use anyhow::Result;
+use petgraph::graph::NodeIndex;
+use petgraph::visit::EdgeRef;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::fs;
+use std::sync::RwLock;
+use std::time::SystemTime;
+
+use crate::memory::errors::MemoryError;
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeType {
+    File(String),
+    Function(String),
+    AgentThought(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct MemoryNode {
+    pub id: uuid::Uuid,
+    pub node_type: NodeType,
+    pub content: String,
+    pub timestamp: SystemTime,
+}
+
+#[derive(Clone, Debug)]
+pub enum EdgeType {
+    Contains,
+    Calls,
+    Implements,
+    RelatesTo,
+}
+
+pub struct GraphMemory {
+    graph: RwLock<petgraph::Graph<MemoryNode, EdgeType>>,
+}
+
+impl GraphMemory {
+    pub fn new() -> Self {
+        Self {
+            graph: RwLock::new(petgraph::Graph::new()),
+        }
+    }
+
+    pub fn add_node(&self, node: MemoryNode) -> NodeIndex {
+        let mut graph = self
+            .graph
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        graph.add_node(node)
+    }
+
+    pub fn add_edge(&self, from: NodeIndex, to: NodeIndex, edge: EdgeType) {
+        let mut graph = self
+            .graph
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        graph.add_edge(from, to, edge);
+    }
+
+    pub fn retrieve_context(
+        &self,
+        target: &NodeType,
+        depth: usize,
+    ) -> std::result::Result<Vec<MemoryNode>, MemoryError> {
+        let graph = self
+            .graph
+            .read()
+            .map_err(|_| MemoryError::Graph("graph lock poisoned".to_string()))?;
+        let start = graph
+            .node_indices()
+            .find(|idx| graph[*idx].node_type == *target)
+            .ok_or_else(|| MemoryError::Graph("target node not found".to_string()))?;
+
+        let mut seen = std::collections::HashSet::from([start]);
+        let mut queue = std::collections::VecDeque::from([(start, 0usize)]);
+        let mut nodes = Vec::new();
+
+        while let Some((current, current_depth)) = queue.pop_front() {
+            if current_depth == depth {
+                continue;
+            }
+
+            let neighbors = graph
+                .edges_directed(current, petgraph::Direction::Outgoing)
+                .map(|edge| edge.target())
+                .chain(
+                    graph
+                        .edges_directed(current, petgraph::Direction::Incoming)
+                        .map(|edge| edge.source()),
+                )
+                .collect::<Vec<_>>();
+
+            for neighbor in neighbors {
+                if seen.insert(neighbor) {
+                    nodes.push(graph[neighbor].clone());
+                    queue.push_back((neighbor, current_depth + 1));
+                }
+            }
+        }
+
+        Ok(nodes)
+    }
+}
+
+impl Default for GraphMemory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -205,4 +312,38 @@ fn extract_wikilinks(content: &str) -> Vec<String> {
     }
 
     links
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EdgeType, GraphMemory, MemoryNode, NodeType};
+
+    fn node(node_type: NodeType) -> MemoryNode {
+        MemoryNode {
+            id: uuid::Uuid::new_v4(),
+            node_type,
+            content: "content".to_string(),
+            timestamp: std::time::SystemTime::now(),
+        }
+    }
+
+    #[test]
+    fn retrieve_context_returns_incoming_and_outgoing_neighbors() {
+        let memory = GraphMemory::new();
+        let file = memory.add_node(node(NodeType::File("lib.rs".to_string())));
+        let function_b = memory.add_node(node(NodeType::Function("b".to_string())));
+        let function_c = memory.add_node(node(NodeType::Function("c".to_string())));
+        memory.add_edge(file, function_b, EdgeType::Contains);
+        memory.add_edge(function_b, function_c, EdgeType::Calls);
+
+        let context = memory
+            .retrieve_context(&NodeType::Function("b".to_string()), 1)
+            .expect("context");
+        let types = context
+            .iter()
+            .map(|node| node.node_type.clone())
+            .collect::<Vec<_>>();
+        assert!(types.contains(&NodeType::File("lib.rs".to_string())));
+        assert!(types.contains(&NodeType::Function("c".to_string())));
+    }
 }

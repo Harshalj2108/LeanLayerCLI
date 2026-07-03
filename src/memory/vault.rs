@@ -1,10 +1,93 @@
 use anyhow::Result;
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine;
 use chrono::Local;
+use rand::RngCore;
 use std::fs;
 use std::path::PathBuf;
 
 use crate::backend::protocol::ChatMessage;
 use crate::config::Config;
+use crate::memory::errors::MemoryError;
+
+pub struct SecureVault {
+    pub master_key: [u8; 32],
+    pub storage_path: PathBuf,
+}
+
+impl SecureVault {
+    pub async fn init(storage_path: PathBuf, password: &str) -> std::result::Result<Self, MemoryError> {
+        let mut master_key = [0u8; 32];
+        pbkdf2::pbkdf2_hmac::<sha2::Sha256>(
+            password.as_bytes(),
+            b"LeanLayerCLI secure vault v1",
+            120_000,
+            &mut master_key,
+        );
+        if let Some(parent) = storage_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if tokio::fs::metadata(&storage_path).await.is_err() {
+            tokio::fs::write(&storage_path, "{}").await?;
+        }
+        Ok(Self {
+            master_key,
+            storage_path,
+        })
+    }
+
+    pub async fn store_secret(&self, key: &str, secret: &str) -> std::result::Result<(), MemoryError> {
+        let cipher = Aes256Gcm::new_from_slice(&self.master_key)
+            .map_err(|err| MemoryError::Vault(err.to_string()))?;
+        let mut nonce_bytes = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = cipher.encrypt(nonce, secret.as_bytes())?;
+
+        let mut data = self.read_store().await?;
+        data[key] = serde_json::json!({
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce_bytes),
+            "ciphertext": base64::engine::general_purpose::STANDARD.encode(ciphertext)
+        });
+        self.write_store(&data).await
+    }
+
+    pub async fn retrieve_secret(&self, key: &str) -> std::result::Result<String, MemoryError> {
+        let data = self.read_store().await?;
+        let entry = data
+            .get(key)
+            .ok_or_else(|| MemoryError::Vault(format!("secret not found: {}", key)))?;
+        let nonce = entry
+            .get("nonce")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| MemoryError::Vault("secret nonce missing".to_string()))?;
+        let ciphertext = entry
+            .get("ciphertext")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| MemoryError::Vault("secret ciphertext missing".to_string()))?;
+        let nonce_bytes = base64::engine::general_purpose::STANDARD
+            .decode(nonce)
+            .map_err(|err| MemoryError::Vault(err.to_string()))?;
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode(ciphertext)
+            .map_err(|err| MemoryError::Vault(err.to_string()))?;
+        let cipher = Aes256Gcm::new_from_slice(&self.master_key)
+            .map_err(|err| MemoryError::Vault(err.to_string()))?;
+        let plaintext = cipher.decrypt(Nonce::from_slice(&nonce_bytes), ciphertext.as_ref())?;
+        String::from_utf8(plaintext).map_err(|err| MemoryError::Vault(err.to_string()))
+    }
+
+    async fn read_store(&self) -> std::result::Result<serde_json::Value, MemoryError> {
+        let contents = tokio::fs::read_to_string(&self.storage_path).await?;
+        Ok(serde_json::from_str(&contents)?)
+    }
+
+    async fn write_store(&self, data: &serde_json::Value) -> std::result::Result<(), MemoryError> {
+        tokio::fs::write(&self.storage_path, serde_json::to_string_pretty(data)?).await?;
+        Ok(())
+    }
+}
 
 pub struct VaultWriter {
     vault_path: PathBuf,
@@ -172,4 +255,31 @@ pub fn list_sessions() -> Result<()> {
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SecureVault;
+    use crate::memory::errors::MemoryError;
+
+    #[tokio::test]
+    async fn secure_vault_roundtrip_and_wrong_password_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("vault.json");
+        let vault = SecureVault::init(path.clone(), "password")
+            .await
+            .expect("vault");
+        vault
+            .store_secret("api", "secret-value")
+            .await
+            .expect("store");
+        let secret = vault.retrieve_secret("api").await.expect("retrieve");
+        assert_eq!(secret, "secret-value");
+
+        let wrong = SecureVault::init(path, "wrong-password")
+            .await
+            .expect("wrong vault");
+        let err = wrong.retrieve_secret("api").await.expect_err("decrypt fail");
+        assert!(matches!(err, MemoryError::Vault(_)));
+    }
 }

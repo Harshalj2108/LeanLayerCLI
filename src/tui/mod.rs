@@ -152,3 +152,35 @@ pub async fn run(start_config: bool) -> Result<()> {
 
     Ok(())
 }
+
+pub fn init_terminal(
+) -> color_eyre::Result<ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    Ok(Terminal::new(backend)?)
+}
+
+pub fn restore_terminal() -> color_eyre::Result<()> {
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, LeaveAlternateScreen)?;
+    Ok(())
+}
+
+pub fn setup_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = restore_terminal();
+        default_hook(panic_info);
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn panic_hook_can_be_installed() {
+        crate::tui::setup_panic_hook();
+    }
+}

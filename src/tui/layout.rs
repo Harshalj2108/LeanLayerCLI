@@ -8,23 +8,86 @@ use ratatui::{
 
 
 use super::app::{App, Focus};
-use super::graph::render_graph;
+use super::graph::render_memory_graph_text;
 
-// Catppuccin Mocha Refined Color Palette
-const CRUST: Color = Color::Rgb(17, 17, 27);      // App Status bar / Shell background
-const MANTLE: Color = Color::Rgb(24, 24, 37);    // Sidebar panel background
-const BASE: Color = Color::Rgb(30, 30, 46);      // Central Chat Workspace background
-const SURFACE0: Color = Color::Rgb(49, 50, 68);  // Inactive elements / Badges
-const SURFACE1: Color = Color::Rgb(69, 71, 90);  // Subtle Dividers
-const TEXT: Color = Color::Rgb(205, 214, 244);      // Default Text
-const SUBTEXT0: Color = Color::Rgb(166, 173, 200);  // Muted secondary text
+// Futuristic console palette with distinct thermal, spectral, and neon accents.
+const CRUST: Color = Color::Rgb(6, 10, 16);
+const MANTLE: Color = Color::Rgb(10, 18, 26);
+const BASE: Color = Color::Rgb(13, 24, 34);
+const SURFACE0: Color = Color::Rgb(31, 45, 56);
+const SURFACE1: Color = Color::Rgb(61, 80, 92);
+const TEXT: Color = Color::Rgb(224, 238, 235);
+const SUBTEXT0: Color = Color::Rgb(145, 164, 166);
 
-const BLUE: Color = Color::Rgb(137, 180, 250);     // Active focus indicator
-const MAUVE: Color = Color::Rgb(203, 166, 247);    // Assistant primary theme
-const GREEN: Color = Color::Rgb(166, 227, 161);    // User response accent
-const YELLOW: Color = Color::Rgb(249, 226, 175);   // Warning / Fast mode
-const RED: Color = Color::Rgb(243, 139, 168);      // Deletions / Modal highlights
-const SAPPHIRE: Color = Color::Rgb(116, 199, 236); // Context structures / Deep mode
+const BLUE: Color = Color::Rgb(64, 188, 255);
+const MAUVE: Color = Color::Rgb(238, 92, 255);
+const GREEN: Color = Color::Rgb(63, 230, 166);
+const YELLOW: Color = Color::Rgb(255, 196, 87);
+const RED: Color = Color::Rgb(255, 93, 116);
+const SAPPHIRE: Color = Color::Rgb(111, 132, 255);
+
+pub fn render(f: &mut Frame, app: &App) {
+    let root = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+        .split(f.area());
+
+    crate::tui::graph::render_graph(f, root[0], &app.graph_nodes);
+
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)])
+        .split(root[1]);
+
+    let mut chat_lines = Vec::new();
+    for message in &app.messages {
+        chat_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", message.role.to_uppercase()),
+                Style::default().fg(SAPPHIRE).add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(message.content.clone()),
+        ]));
+    }
+    if !app.current_response.is_empty() {
+        chat_lines.push(Line::from(vec![
+            Span::styled("ASSISTANT ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
+            Span::raw(app.current_response.clone()),
+        ]));
+    }
+
+    f.render_widget(
+        Paragraph::new(chat_lines)
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+            .title(" LEANLAYER // NEURAL WORKSPACE ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(SURFACE1))
+                    .bg(BASE),
+            )
+            .style(Style::default().fg(TEXT)),
+        right[0],
+    );
+
+    let input_text = if app.input_mode == crate::tui::app::InputMode::Editing {
+        format!("{} ", app.input_buffer)
+    } else {
+        app.input_buffer.clone()
+    };
+    f.render_widget(
+        Paragraph::new(input_text)
+            .block(
+                Block::default()
+                    .title(" PROMPT // COMMAND LINE ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(GREEN))
+                    .bg(MANTLE),
+            )
+            .style(Style::default().fg(TEXT)),
+        right[1],
+    );
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // 3-tier classic terminal vertical hierarchy
@@ -58,13 +121,13 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = matches!(app.focus, Focus::Chat);
     
     // Instead of heavy box borders, we use a top margin line with a clean unicode indicator
-    let focus_marker = if is_focused { "●" } else { "○" };
+    let focus_marker = if is_focused { ">" } else { "." };
     let focus_color = if is_focused { BLUE } else { SURFACE0 };
 
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(format!(" {} ", focus_marker), Style::default().fg(focus_color)),
-            Span::styled("Chat Workspace", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled("CHAT // WORKSPACE", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
         ]))
         .borders(Borders::TOP) // Remove surrounding borders, stick to clean top panel divider
         .border_style(Style::default().fg(SURFACE0))
@@ -88,7 +151,7 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
         // Streamlined inline line metadata layout rather than chunky badges
         items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!("❯ {}", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+            Span::styled(format!(">> {}", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
         ])));
 
         // Content indented elegantly
@@ -111,8 +174,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     // Streaming state response
     if !app.current_response.is_empty() {
         items.push(ListItem::new(Line::from(vec![
-            Span::styled("❯ AI Assistant ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
-            Span::styled("▊", Style::default().fg(MAUVE).add_modifier(Modifier::RAPID_BLINK)),
+            Span::styled(">> AI Assistant ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
+            Span::styled("|", Style::default().fg(MAUVE).add_modifier(Modifier::RAPID_BLINK)),
         ])));
         let md_text = tui_markdown::from_str(&app.current_response);
         let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
@@ -151,8 +214,8 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             .orientation(ScrollbarOrientation::VerticalRight)
             .begin_symbol(None)
             .end_symbol(None)
-            .track_symbol(Some("│"))
-            .thumb_symbol("┃")
+            .track_symbol(Some("|"))
+            .thumb_symbol("#")
             .style(Style::default().fg(SURFACE0)),
         inner,
         &mut scrollbar_state,
@@ -161,14 +224,14 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     let is_focused = matches!(app.focus, Focus::Graph);
-    let focus_marker = if is_focused { "●" } else { "○" };
+    let focus_marker = if is_focused { ">" } else { "." };
     let focus_color = if is_focused { SAPPHIRE } else { SURFACE0 };
 
     // Sidebar structure with light left divider accent
     let block = Block::default()
         .title(Line::from(vec![
             Span::styled(format!(" {} ", focus_marker), Style::default().fg(focus_color)),
-            Span::styled("Context Graph", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
+            Span::styled("CONTEXT // GRAPH", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)),
         ]))
         .borders(Borders::TOP | Borders::LEFT)
         .border_style(Style::default().fg(SURFACE0))
@@ -177,7 +240,7 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let graph_text = render_graph(&app.graph, Some(app.selected_node_index), inner.width as usize, inner.height as usize);
+    let graph_text = render_memory_graph_text(&app.graph, Some(app.selected_node_index), inner.width as usize, inner.height as usize);
     let total_lines = graph_text.lines.len();
     let scroll_pos = app.graph_scroll.min(total_lines.saturating_sub(inner.height as usize)) as u16;
     
@@ -189,22 +252,45 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(para, inner);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::render;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn render_contains_borders_messages_and_input() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).expect("terminal");
+        let app = crate::tui::app::App::test_fixture();
+        terminal.draw(|frame| render(frame, &app)).expect("draw");
+        let buffer = terminal.backend().buffer().content();
+        let rendered = buffer
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(rendered.contains("Neural Workspace"));
+        assert!(rendered.contains("hello"));
+        assert!(rendered.contains("Context Graph"));
+    }
+}
+
 fn draw_input(f: &mut Frame, app: &mut App, area: Rect) {
     let is_focused = matches!(app.focus, Focus::Chat);
     let border_color = if is_focused { GREEN } else { SURFACE0 };
 
     // Sleek continuous top horizontal line accent matching modern minimalist styles
     let block = Block::default()
-        .title(Span::styled(" ✎ Compose Prompt ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
+        .title(Span::styled(" PROMPT // COMPOSE ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
         .borders(Borders::TOP)
         .border_style(Style::default().fg(border_color))
         .bg(MANTLE);
 
     if app.is_generating {
         let msg = if app.current_response.is_empty() {
-            "  ▊ Warming up models..."
+            "  | Warming up model link..."
         } else {
-            "  ● Syncing with AI cluster node..."
+            "  > Streaming from inference node..."
         };
         let input = Paragraph::new(msg)
             .block(block)
@@ -242,7 +328,7 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     let rpm_gauge = if app.rate_max > 0 {
         let filled = (app.rate_rpm as f32 / app.rate_max as f32 * 10.0) as usize;
         let empty = 10usize.saturating_sub(filled);
-        format!("{}{}{}", "█".repeat(filled), "░".repeat(empty), app.rate_rpm)
+        format!("{}{}{}", "#".repeat(filled), ".".repeat(empty), app.rate_rpm)
     } else {
         "--".into()
     };
@@ -257,15 +343,15 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
     };
 
     let status = Paragraph::new(Line::from(vec![
-        Span::styled(" AIRLLM ", Style::default().fg(CRUST).bg(BLUE).add_modifier(Modifier::BOLD)),
+        Span::styled(" LEANLAYER ", Style::default().fg(CRUST).bg(BLUE).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{}", mode_str), Style::default().fg(mode_color_fg).bg(mode_color_bg).add_modifier(Modifier::BOLD)),
         Span::styled(format!("{}", role_str), Style::default().fg(CRUST).bg(role_color).add_modifier(Modifier::BOLD)),
-        Span::raw(" ┃ "),
+        Span::raw(" | "),
         Span::styled(&app.status, Style::default().fg(SUBTEXT0)),
         Span::raw("  "),
         Span::styled(rpm_label, Style::default().fg(rpm_color)),
         Span::styled(format!(" {} ", rpm_gauge), Style::default().fg(rpm_color)),
-        Span::raw(" ┃ "),
+        Span::raw(" | "),
         Span::styled(token_gauge, Style::default().fg(token_color)),
     ])).bg(CRUST);
 
@@ -288,7 +374,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
     match modal {
         super::app::ModalState::SessionViewer { title, content, scroll, is_session, .. } => {
             let block = Block::default()
-                .title(Span::styled(format!(" 📄 Historical Viewer: {} ", title), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(format!(" MEMORY // HISTORICAL VIEWER: {} ", title), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
 
@@ -311,7 +397,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let mut footer_spans = vec![
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
                 Span::raw(" Close  "),
-                Span::styled(" ▲/▼ ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::styled(" Up/Down ", Style::default().fg(TEXT).bg(SURFACE0)),
                 Span::raw(" Navigate "),
             ];
             if *is_session {
@@ -322,7 +408,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
         }
         super::app::ModalState::ToolGatekeeper { call, pending_others } => {
             let block = Block::default()
-                .title(Span::styled(" ⚡ Pipeline Execution Request ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(" AGENT // PIPELINE EXECUTION REQUEST ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
 
@@ -344,7 +430,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
         }
         super::app::ModalState::CodeGatekeeper { request, pending_others } => {
             let block = Block::default()
-                .title(Span::styled(" 🛠️ Sandboxed Script Block Execution ", Style::default().fg(RED).add_modifier(Modifier::BOLD)))
+                .title(Span::styled(" SANDBOX // SCRIPT BLOCK EXECUTION ", Style::default().fg(RED).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
 
@@ -383,7 +469,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let mut items = Vec::new();
             for (i, (name, val)) in fields.iter().enumerate() {
                 let is_active = *active_field == i;
-                let marker = if is_active { "❯ " } else { "  " };
+                let marker = if is_active { "> " } else { "  " };
                 let style = if is_active { Style::default().fg(BLUE).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
                 
                 let text = format!("{}{} : {}", marker, name, val);
@@ -401,7 +487,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
             let footer = Line::from(vec![
                 Span::styled(" Ctrl+S ", Style::default().fg(CRUST).bg(GREEN)),
-                Span::raw(" Commit Changes ┃ "),
+                Span::raw(" Commit Changes | "),
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
                 Span::raw(" Exit Editor"),
             ]);
@@ -422,7 +508,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let mut items = Vec::new();
             for (i, (lang, code)) in blocks.iter().enumerate() {
                 let is_active = *selected_index == i;
-                let marker = if is_active { "❯ " } else { "  " };
+                let marker = if is_active { "> " } else { "  " };
                 let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
 
                 let first_line = code.lines().next().unwrap_or("").trim();
@@ -445,7 +531,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
             let footer = Line::from(vec![
                 Span::styled(" Ctrl+Shift+C ", Style::default().fg(CRUST).bg(GREEN).add_modifier(Modifier::BOLD)),
-                Span::raw(" Yank Block ┃ "),
+                Span::raw(" Yank Block | "),
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
                 Span::raw(" Cancel"),
             ]);
@@ -461,15 +547,15 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let mut items = Vec::new();
             for (i, file) in files.iter().enumerate() {
                 let is_active = *selected_index == i;
-                let marker = if is_active { "❯ " } else { "  " };
+                let marker = if is_active { "> " } else { "  " };
                 let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
 
                 let depth = file.relative_path.matches('/').count();
                 let indent = "  ".repeat(depth);
-                let icon = if file.is_dir { "📁" } else { "📄" };
+                let icon = if file.is_dir { "[D]" } else { "[F]" };
                 let name = file.relative_path.split('/').last().unwrap_or(&file.relative_path);
                 let is_pinned = app.pinned_files.contains(&file.relative_path);
-                let pin_badge = if is_pinned { " 📌 " } else { "" };
+                let pin_badge = if is_pinned { " [PIN] " } else { "" };
                 let size_str = if file.is_dir { String::new() } else { format!(" ({}B)", file.size) };
 
                 let display = format!("{}{} {}{}{}", indent, icon, name, pin_badge, size_str);
@@ -505,7 +591,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             let total_items = status.modified_files.len() + status.untracked_files.len();
 
             // Header: branch info
-            items.push(ListItem::new(format!("🌿 Branch: {}", status.branch)).style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)));
+            items.push(ListItem::new(format!("BRANCH: {}", status.branch)).style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)));
             items.push(ListItem::new(""));
 
             if !status.modified_files.is_empty() {
@@ -513,9 +599,9 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 for (i, file) in status.modified_files.iter().enumerate() {
                     let idx = i + 2;
                     let is_active = *selected_index == idx;
-                    let marker = if is_active { "❯ " } else { "  " };
+                    let marker = if is_active { "> " } else { "  " };
                     let style = if is_active { Style::default().fg(YELLOW).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
-                    items.push(ListItem::new(format!("{}📝 {}", marker, file)).style(style));
+                    items.push(ListItem::new(format!("{}M {}", marker, file)).style(style));
                 }
             }
 
@@ -526,9 +612,9 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 for (i, file) in status.untracked_files.iter().enumerate() {
                     let idx = offset + i;
                     let is_active = *selected_index == idx;
-                    let marker = if is_active { "❯ " } else { "  " };
+                    let marker = if is_active { "> " } else { "  " };
                     let style = if is_active { Style::default().fg(RED).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
-                    items.push(ListItem::new(format!("{}❓ {}", marker, file)).style(style));
+                    items.push(ListItem::new(format!("{}? {}", marker, file)).style(style));
                 }
             }
 

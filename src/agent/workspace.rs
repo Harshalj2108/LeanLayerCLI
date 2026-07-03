@@ -1,7 +1,106 @@
 #![allow(dead_code)]
 use anyhow::Result;
-use std::path::{Path, PathBuf};
 use std::fs;
+use std::path::{Path, PathBuf};
+
+use crate::agent::errors::AgentError;
+
+#[derive(Debug, Clone)]
+pub struct Workspace {
+    base_path: PathBuf,
+}
+
+impl Workspace {
+    pub fn new(path: impl AsRef<Path>) -> std::result::Result<Self, AgentError> {
+        let base_path = path.as_ref().canonicalize().map_err(AgentError::Ipc)?;
+        if !base_path.is_dir() {
+            return Err(AgentError::Security(format!(
+                "{} is not a directory",
+                base_path.display()
+            )));
+        }
+        Ok(Self { base_path })
+    }
+
+    pub fn base_path(&self) -> &Path {
+        &self.base_path
+    }
+
+    pub fn normalize_and_verify(
+        &self,
+        requested: &Path,
+    ) -> std::result::Result<PathBuf, AgentError> {
+        let candidate = if requested.is_absolute() {
+            requested.to_path_buf()
+        } else {
+            self.base_path.join(requested)
+        };
+
+        let canonical = if candidate.exists() {
+            candidate.canonicalize().map_err(AgentError::Ipc)?
+        } else {
+            let parent = candidate.parent().ok_or_else(|| {
+                AgentError::Security(format!("{} has no parent directory", candidate.display()))
+            })?;
+            let canonical_parent = parent.canonicalize().map_err(AgentError::Ipc)?;
+            let file_name = candidate.file_name().ok_or_else(|| {
+                AgentError::Security(format!("{} has no file name", candidate.display()))
+            })?;
+            canonical_parent.join(file_name)
+        };
+
+        if !canonical.starts_with(&self.base_path) {
+            return Err(AgentError::Security(format!(
+                "{} escapes {}",
+                canonical.display(),
+                self.base_path.display()
+            )));
+        }
+
+        Ok(canonical)
+    }
+
+    pub async fn read_file(&self, path: &Path) -> std::result::Result<String, AgentError> {
+        let verified = self.normalize_and_verify(path)?;
+        tokio::fs::read_to_string(verified)
+            .await
+            .map_err(AgentError::Ipc)
+    }
+
+    pub async fn write_file_atomic(
+        &self,
+        path: &Path,
+        contents: &str,
+    ) -> std::result::Result<(), AgentError> {
+        let verified = self.normalize_and_verify(path)?;
+        if let Some(parent) = verified.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(AgentError::Ipc)?;
+        }
+
+        let temp_name = format!(
+            ".{}.{}.tmp",
+            verified
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("leanlayer"),
+            uuid::Uuid::new_v4()
+        );
+        let temp_path = verified
+            .parent()
+            .unwrap_or_else(|| self.base_path.as_path())
+            .join(temp_name);
+
+        tokio::fs::write(&temp_path, contents)
+            .await
+            .map_err(AgentError::Ipc)?;
+        tokio::fs::rename(&temp_path, &verified)
+            .await
+            .map_err(AgentError::Ipc)?;
+        Ok(())
+    }
+}
 
 /// Enhancement #9: Workspace file tree awareness
 #[derive(Debug, Clone)]
@@ -271,5 +370,33 @@ pub fn git_commit(workspace_dir: &Path, message: &str) -> Result<String> {
         Ok(String::from_utf8_lossy(&commit_output.stdout).trim().to_string())
     } else {
         anyhow::bail!("git commit failed: {}", String::from_utf8_lossy(&commit_output.stderr));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workspace;
+
+    #[test]
+    fn normalize_rejects_parent_escape() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        let result = workspace.normalize_and_verify(std::path::Path::new("../../../etc/passwd"));
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn atomic_write_and_read_roundtrip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = Workspace::new(dir.path()).expect("workspace");
+        workspace
+            .write_file_atomic(std::path::Path::new("note.txt"), "hello")
+            .await
+            .expect("write");
+        let content = workspace
+            .read_file(std::path::Path::new("note.txt"))
+            .await
+            .expect("read");
+        assert_eq!(content, "hello");
     }
 }
