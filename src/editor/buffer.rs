@@ -16,7 +16,7 @@ pub struct Cursor {
     pub line: usize,
     pub char_idx: usize,
 }
-
+#[derive(Clone)]
 pub struct TextBuffer {
     pub file_path: Option<PathBuf>,
     pub(crate) rope: ropey::Rope,
@@ -75,6 +75,47 @@ impl TextBuffer {
         self.cursor.char_idx += 1;
         self.modified = true;
         Ok(())
+    }
+
+    pub fn insert_newline(&mut self) -> Result<(), EditorError> {
+        self.insert_char('\n')?;
+        self.cursor.line += 1;
+        self.cursor.char_idx = 0;
+        Ok(())
+    }
+
+    pub fn delete_char(&mut self) -> Result<(), EditorError> {
+        let line_start = self.rope.line_to_char(self.cursor.line);
+        let char_index = line_start + self.cursor.char_idx;
+        if char_index > 0 {
+            self.rope.remove(char_index - 1..char_index);
+            if self.cursor.char_idx > 0 {
+                self.cursor.char_idx -= 1;
+            } else {
+                self.cursor.line = self.cursor.line.saturating_sub(1);
+                self.cursor.char_idx = self.rope.line(self.cursor.line).len_chars().saturating_sub(1);
+            }
+            self.modified = true;
+        }
+        Ok(())
+    }
+
+    pub fn move_cursor(&mut self, dx: isize, dy: isize) {
+        if dy < 0 {
+            self.cursor.line = self.cursor.line.saturating_sub((-dy) as usize);
+        } else if dy > 0 {
+            self.cursor.line = self.cursor.line.saturating_add(dy as usize).min(self.rope.len_lines().saturating_sub(1));
+        }
+
+        let line_len = self.rope.line(self.cursor.line).len_chars().saturating_sub(1); // excluding newline
+        if dx < 0 {
+            self.cursor.char_idx = self.cursor.char_idx.saturating_sub((-dx) as usize);
+        } else if dx > 0 {
+            self.cursor.char_idx = self.cursor.char_idx.saturating_add(dx as usize).min(line_len);
+        } else {
+            // Keep cursor bounded within the new line length when moving vertically
+            self.cursor.char_idx = self.cursor.char_idx.min(line_len);
+        }
     }
 
     pub fn apply_patch(

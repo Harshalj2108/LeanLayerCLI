@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
 mod agent;
 mod backend;
 mod bootstrap;
@@ -8,10 +9,11 @@ mod editor;
 mod explorer;
 mod integration;
 mod memory;
-mod plugins;
+
 mod telemetry;
 mod tui;
 mod workflow;
+mod plugins;
 
 use clap::Parser;
 
@@ -29,7 +31,16 @@ async fn main() -> color_eyre::Result<()> {
         }
     };
 
-    match cli.command {
+    match cli.command.unwrap_or(crate::cli::Commands::Chat) {
+        crate::cli::Commands::Chat => {
+            crate::tui::run(false)
+                .await
+                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+        }
+        crate::cli::Commands::Sessions => {
+            crate::memory::list_sessions()
+                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
+        }
         crate::cli::Commands::Config { edit } => {
             if edit {
                 crate::tui::run(true)
@@ -44,51 +55,13 @@ async fn main() -> color_eyre::Result<()> {
                 let password = std::env::var("LEANLAYER_VAULT_PASSWORD")
                     .unwrap_or_else(|_| "local-development-password".to_string());
                 let vault_path = app_data_dir().join("secure-vault.json");
-                let vault = crate::memory::vault::SecureVault::init(vault_path, &password).await?;
+                let vault =
+                    crate::memory::vault::SecureVault::init(vault_path, &password).await?;
                 vault.store_secret("api_key", &secret).await?;
                 println!("Secret stored in encrypted vault.");
             } else {
                 println!("{}", app_data_dir().join("secure-vault.json").display());
             }
-        }
-        crate::cli::Commands::Sessions => {
-            crate::memory::list_sessions()
-                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
-        }
-        crate::cli::Commands::Start { path } => {
-            crate::tui::setup_panic_hook();
-
-            let app_dir = app_data_dir();
-            let python_env =
-                crate::bootstrap::python_env::PythonEnvironment::ensure_initialized(&app_dir)
-                    .await?;
-            python_env
-                .sync_requirements(&std::path::PathBuf::from("requirements.txt"))
-                .await?;
-
-            let app_config_path = app_dir.join("app-config.toml");
-            let mut app_config =
-                crate::config::AppConfig::load_or_default(&app_config_path).await?;
-            if let Some(path) = path {
-                app_config.workspace_root = path;
-                app_config.save(&app_config_path).await?;
-            }
-
-            let _graph_memory = crate::memory::graph::GraphMemory::new();
-            let password = std::env::var("LEANLAYER_VAULT_PASSWORD")
-                .unwrap_or_else(|_| "local-development-password".to_string());
-            let _vault =
-                crate::memory::vault::SecureVault::init(app_dir.join("secure-vault.json"), &password)
-                    .await?;
-            let _workspace =
-                crate::agent::workspace::Workspace::new(&app_config.workspace_root)?;
-
-            let (_ui_tx, _ui_rx) = tokio::sync::mpsc::channel::<String>(64);
-            let (_agent_tx, _agent_rx) = tokio::sync::mpsc::channel::<crate::tui::app::AgentMessage>(64);
-
-            crate::tui::run(false)
-                .await
-                .map_err(|err| color_eyre::eyre::eyre!(err.to_string()))?;
         }
     }
 

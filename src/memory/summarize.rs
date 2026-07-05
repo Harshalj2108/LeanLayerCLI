@@ -68,7 +68,7 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.split_whitespace().count().saturating_mul(4) / 3
 }
 
-pub async fn compress_context(
+pub fn compress_context(
     mut nodes: Vec<MemoryNode>,
     max_tokens: usize,
 ) -> std::result::Result<String, MemoryError> {
@@ -113,7 +113,7 @@ mod tests {
             content: text,
             timestamp: std::time::SystemTime::now(),
         };
-        let compressed = compress_context(vec![node], 5000).await.expect("compress");
+        let compressed = compress_context(vec![node], 5000).expect("compress");
         assert!(estimate_tokens(&compressed) <= 5000);
     }
 }

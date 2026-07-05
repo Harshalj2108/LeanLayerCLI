@@ -196,11 +196,25 @@ pub fn print_config_path() {
     println!("{}", config_path().display());
 }
 
-/// Resolve API key: check api_keys map first, then environment variable
-pub fn resolve_api_key(cfg: &Config) -> Option<String> {
+/// Resolve API key: check api_keys map first, then Vault, then environment variable
+pub async fn resolve_api_key(cfg: &Config) -> Option<String> {
     if let Some(key) = cfg.api_keys.get(&cfg.api_provider) {
         if !key.is_empty() {
             return Some(key.clone());
+        }
+    }
+
+    // Try Vault
+    if let Ok(password) = std::env::var("LEANLAYER_VAULT_PASSWORD") {
+        let vault_path = dirs::data_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("leanlayer-cli")
+            .join("secure-vault.json");
+        if let Ok(vault) = crate::memory::vault::SecureVault::init(vault_path, &password).await {
+            let secret_key = "api_key";
+            if let Ok(secret) = vault.retrieve_secret(secret_key).await {
+                return Some(secret);
+            }
         }
     }
 

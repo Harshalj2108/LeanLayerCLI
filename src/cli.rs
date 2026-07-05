@@ -1,25 +1,26 @@
 #[derive(clap::Parser)]
-#[command(author, version, about, long_about = None)]
+#[command(name = "airllm", about = "Chat with large LLMs in your terminal")]
 pub struct Cli {
     #[command(subcommand)]
-    pub command: Commands,
+    pub command: Option<Commands>,
 }
 
 #[derive(clap::Subcommand)]
 pub enum Commands {
-    Start {
-        #[arg(short, long)]
-        path: Option<std::path::PathBuf>,
-    },
+    /// Start an interactive chat session
+    Chat,
+    /// List past sessions
+    Sessions,
+    /// Manage configuration
     Config {
-        #[arg(short, long)]
+        #[arg(long, help = "Open interactive configuration editor")]
         edit: bool,
     },
+    /// Manage encrypted vault
     Vault {
         #[arg(short, long)]
         set_key: Option<String>,
     },
-    Sessions,
 }
 
 #[cfg(test)]

@@ -193,6 +193,18 @@ pub enum ToolCall {
         name: String,
         args: serde_json::Value,
     },
+    /// Get the current git repository status
+    GitStatus,
+    /// Commit all staged and unstaged changes
+    GitCommit {
+        message: String,
+    },
+    /// Hover over a code symbol using the LSP
+    LspHover {
+        file_uri: String,
+        line: u32,
+        character: u32,
+    },
 }
 
 /// Parse tool calls from assistant response
@@ -234,6 +246,9 @@ pub fn format_tool_result(call: &ToolCall, output: &str, success: bool) -> Strin
         ToolCall::SearchFiles { query, .. } => format!("search: {}", query),
         ToolCall::WebSearch { query } => format!("web_search: {}", query),
         ToolCall::McpToolCall { server, name, .. } => format!("mcp_tool: {}/{}", server, name),
+        ToolCall::GitStatus => format!("git_status"),
+        ToolCall::GitCommit { message } => format!("git_commit: {}", message),
+        ToolCall::LspHover { file_uri, line, character } => format!("lsp_hover: {}:{}:{}", file_uri, line, character),
     };
 
     let status = if success { "SUCCESS" } else { "FAILED" };
@@ -281,13 +296,31 @@ Search the internet for information:
 ```tool
 {{"tool": "web_search", "query": "search query here"}}
 ```
+
+### 6. Git Status
+Get the status of the current git repository:
+```tool
+{{"tool": "git_status"}}
+```
+
+### 7. Git Commit
+Commit all staged and unstaged changes:
+```tool
+{{"tool": "git_commit", "message": "commit message"}}
+```
+
+### 8. LSP Hover
+Hover over a code symbol using the Language Server Protocol:
+```tool
+{{"tool": "lsp_hover", "file_uri": "/path/to/file.rs", "line": 10, "character": 5}}
+```
 "#, persona);
 
     if !mcp_tools.is_empty() {
         prompt.push_str("\n### External MCP Tools\n");
         for (i, (server, tool)) in mcp_tools.iter().enumerate() {
             prompt.push_str(&format!(
-                "#### 6.{} {} ({})\n{}\n```tool\n{{\"tool\": \"mcp_tool\", \"server\": \"{}\", \"name\": \"{}\", \"args\": {}}}\n```\n",
+                "#### 9.{} {} ({})\n{}\n```tool\n{{\"tool\": \"mcp_tool\", \"server\": \"{}\", \"name\": \"{}\", \"args\": {}}}\n```\n",
                 i + 1,
                 tool.name,
                 server,

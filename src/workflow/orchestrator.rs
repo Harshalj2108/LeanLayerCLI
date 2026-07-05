@@ -18,6 +18,8 @@ impl WorkflowEngine {
         }
     }
 
+    /// Evaluates the current plan state. If a Write tool call is detected in the response,
+    /// intercepts it to generate a patch. Otherwise advances the plan.
     pub async fn execute_plan(
         &self,
         mut plan: WorkflowPlan,
@@ -35,6 +37,9 @@ impl WorkflowEngine {
                 plan.advance();
             }
 
+            // In a real autonomous loop this would invoke the backend and wait for the response.
+            // For now, we simulate interception if the step description mentions "write".
+            // The actual interaction is orchestrated in app.rs's trigger_backend loop.
             if plan.steps[current_index]
                 .description
                 .to_ascii_lowercase()

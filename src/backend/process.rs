@@ -25,11 +25,12 @@ impl Backend {
     pub fn get_rate_limiter(&self) -> RateLimiterHandle {
         self.rate_limiter.clone()
     }
-    pub fn spawn(cfg: &Config) -> Result<Self> {
+    pub async fn spawn(cfg: &Config) -> Result<Self> {
         let api_provider = cfg.api_provider.clone();
-        let api_key = crate::config::resolve_api_key(cfg);
+        let api_key = crate::config::resolve_api_key(cfg).await;
         let api_model = cfg.api_model.clone();
         let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         let rate_limiter = RateLimiterHandle::new(40);
@@ -70,29 +71,16 @@ impl Backend {
         // Local provider: llama-server
         let base_url = format!("http://127.0.0.1:{}", cfg.port);
 
-        // Health check using reqwest::blocking for simplicity during sync init
-        let server_running = {
-            let health_url = format!("{}/health", base_url);
-            let client_clone = client.clone();
-            std::thread::spawn(move || {
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(_) => return false,
-                };
-                rt.block_on(async {
-                    match client_clone
-                        .get(&health_url)
-                        .timeout(Duration::from_secs(2))
-                        .send()
-                        .await
-                    {
-                        Ok(resp) => resp.status().is_success(),
-                        Err(_) => false,
-                    }
-                })
-            })
-            .join()
-            .unwrap_or(false)
+        // Health check using reqwest
+        let health_url = format!("{}/health", base_url);
+        let server_running = match client
+            .get(&health_url)
+            .timeout(Duration::from_secs(2))
+            .send()
+            .await
+        {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
         };
 
         if server_running {
@@ -526,19 +514,30 @@ async fn stream_openai_response(
         request = request.header("Authorization", format!("Bearer {}", key));
     }
 
+    let _ = std::fs::write("stream_debug.log", format!("Sending request to {} with key {}", url, api_key.is_some()));
     let response = request.json(&body).send().await;
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+        use std::io::Write;
+        writeln!(f, "Request sent, got response")
+    });
 
     match response {
         Ok(resp) => {
             if !resp.status().is_success() {
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+                let _ = std::fs::write("stream_debug.log", format!("API error ({}): {}", status, body));
                 tx.send(BackendMessage::Error {
                     message: format!("API error ({}): {}", status, body),
                 }).ok();
                 return;
             }
+            let _ = std::fs::write("stream_debug.log", "Stream started successfully\n");
             if let Err(e) = stream_openai_chunks(resp, tx.clone()).await {
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "OpenAI streaming error: {}", e)
+                });
                 tx.send(BackendMessage::Error {
                     message: format!("OpenAI streaming error: {}", e),
                 }).ok();
@@ -610,11 +609,30 @@ async fn stream_openai_chunks(
                         }
                         if !text.is_empty() {
                             token_count += 1;
+                            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                                use std::io::Write;
+                                writeln!(f, "TOKEN: {}", text)
+                            });
                             tx.send(BackendMessage::Token {
                                 content: text,
                             }).ok();
+                        } else {
+                            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                                use std::io::Write;
+                                writeln!(f, "EMPTY TEXT FROM CHUNK: {}", chunk)
+                            });
                         }
+                    } else {
+                        let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "NO DELTA IN CHUNK: {}", chunk)
+                        });
                     }
+                } else {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "FAILED TO PARSE JSON: {}", data)
+                    });
                 }
                 line_buf.clear();
             } else {

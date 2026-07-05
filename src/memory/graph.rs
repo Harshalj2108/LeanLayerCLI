@@ -33,7 +33,7 @@ pub enum EdgeType {
 }
 
 pub struct GraphMemory {
-    graph: RwLock<petgraph::Graph<MemoryNode, EdgeType>>,
+    pub graph: RwLock<petgraph::Graph<MemoryNode, EdgeType>>,
 }
 
 impl GraphMemory {

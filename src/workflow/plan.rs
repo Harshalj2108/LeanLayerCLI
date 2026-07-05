@@ -14,6 +14,7 @@ pub struct WorkflowStep {
     pub generated_patch: Option<crate::diff::engine::FilePatch>,
 }
 
+#[derive(Debug)]
 pub struct WorkflowPlan {
     pub goal: String,
     pub steps: Vec<WorkflowStep>,

@@ -17,6 +17,7 @@ pub enum FileNode {
     },
 }
 
+#[derive(Clone)]
 pub struct ExplorerState {
     pub root: FileNode,
     pub selected_path: Option<PathBuf>,
@@ -32,6 +33,7 @@ impl ExplorerState {
             .git_global(true)
             .git_exclude(true)
             .hidden(false)
+            .require_git(false)
             .build();
 
         for entry in walker.filter_map(Result::ok).skip(1) {
@@ -75,6 +77,21 @@ impl ExplorerState {
                     *children = read_children(path).await.ok();
                 }
                 *is_expanded = true;
+            }
+        }
+    }
+
+    pub fn flatten_visible(&self) -> Vec<(usize, &FileNode)> {
+        let mut result = Vec::new();
+        Self::flatten_recursive(&self.root, 0, &mut result);
+        result
+    }
+
+    fn flatten_recursive<'a>(node: &'a FileNode, depth: usize, result: &mut Vec<(usize, &'a FileNode)>) {
+        result.push((depth, node));
+        if let FileNode::Directory { children: Some(children), is_expanded: true, .. } = node {
+            for child in children {
+                Self::flatten_recursive(child, depth + 1, result);
             }
         }
     }

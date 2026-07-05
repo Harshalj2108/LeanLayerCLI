@@ -26,68 +26,6 @@ const YELLOW: Color = Color::Rgb(255, 196, 87);
 const RED: Color = Color::Rgb(255, 93, 116);
 const SAPPHIRE: Color = Color::Rgb(111, 132, 255);
 
-pub fn render(f: &mut Frame, app: &App) {
-    let root = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-        .split(f.area());
-
-    crate::tui::graph::render_graph(f, root[0], &app.graph_nodes);
-
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(3)])
-        .split(root[1]);
-
-    let mut chat_lines = Vec::new();
-    for message in &app.messages {
-        chat_lines.push(Line::from(vec![
-            Span::styled(
-                format!("{} ", message.role.to_uppercase()),
-                Style::default().fg(SAPPHIRE).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(message.content.clone()),
-        ]));
-    }
-    if !app.current_response.is_empty() {
-        chat_lines.push(Line::from(vec![
-            Span::styled("ASSISTANT ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
-            Span::raw(app.current_response.clone()),
-        ]));
-    }
-
-    f.render_widget(
-        Paragraph::new(chat_lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-            .title(" LEANLAYER // NEURAL WORKSPACE ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(SURFACE1))
-                    .bg(BASE),
-            )
-            .style(Style::default().fg(TEXT)),
-        right[0],
-    );
-
-    let input_text = if app.input_mode == crate::tui::app::InputMode::Editing {
-        format!("{} ", app.input_buffer)
-    } else {
-        app.input_buffer.clone()
-    };
-    f.render_widget(
-        Paragraph::new(input_text)
-            .block(
-                Block::default()
-                    .title(" PROMPT // COMMAND LINE ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(GREEN))
-                    .bg(MANTLE),
-            )
-            .style(Style::default().fg(TEXT)),
-        right[1],
-    );
-}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     // 3-tier classic terminal vertical hierarchy
@@ -169,6 +107,34 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             }
         }
         items.push(ListItem::new(Line::from(""))); // Spacing
+    }
+
+    // Render active WorkflowPlan
+    if let Some(plan) = &app.current_plan {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(">> WORKFLOW ORCHESTRATOR ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
+        ])));
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(format!("Goal: {}", plan.goal), Style::default().fg(TEXT)),
+        ])));
+        for (i, step) in plan.steps.iter().enumerate() {
+            let status_str = match &step.status {
+                crate::workflow::plan::StepStatus::Pending => "[ ]",
+                crate::workflow::plan::StepStatus::InProgress => "[>_]",
+                crate::workflow::plan::StepStatus::Completed => "[x]",
+                crate::workflow::plan::StepStatus::Failed(_) => "[!]",
+            };
+            let color = match &step.status {
+                crate::workflow::plan::StepStatus::Pending => SUBTEXT0,
+                crate::workflow::plan::StepStatus::InProgress => YELLOW,
+                crate::workflow::plan::StepStatus::Completed => GREEN,
+                crate::workflow::plan::StepStatus::Failed(_) => RED,
+            };
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled(format!("  {} {}. {}", status_str, i + 1, step.description), Style::default().fg(color)),
+            ])));
+        }
+        items.push(ListItem::new(Line::from("")));
     }
 
     // Streaming state response
@@ -254,24 +220,24 @@ fn draw_graph(f: &mut Frame, app: &App, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::draw;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
     #[test]
     fn render_contains_borders_messages_and_input() {
-        let backend = TestBackend::new(80, 20);
+        let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).expect("terminal");
-        let app = crate::tui::app::App::test_fixture();
-        terminal.draw(|frame| render(frame, &app)).expect("draw");
+        let mut app = crate::tui::app::App::test_fixture();
+        terminal.draw(|frame| draw(frame, &mut app)).expect("draw");
         let buffer = terminal.backend().buffer().content();
         let rendered = buffer
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(rendered.contains("Neural Workspace"));
+        assert!(rendered.contains("WORKSPACE"));
         assert!(rendered.contains("hello"));
-        assert!(rendered.contains("Context Graph"));
+        assert!(rendered.contains("CONTEXT"));
     }
 }
 
@@ -373,7 +339,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
     match modal {
         super::app::ModalState::SessionViewer { title, content, scroll, is_session, .. } => {
-            let block = Block::default()
+            let _block = Block::default()
                 .title(Span::styled(format!(" MEMORY // HISTORICAL VIEWER: {} ", title), Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
@@ -406,8 +372,99 @@ fn draw_modal(f: &mut Frame, app: &App) {
             }
             f.render_widget(Paragraph::new(Line::from(footer_spans)), modal_layout[1]);
         }
+        super::app::ModalState::CodeViewer { title, buffer, scroll } => {
+            let _block = Block::default()
+                .title(Span::styled(format!(" CODE VIEWER // {} ", title), Style::default().fg(GREEN).add_modifier(Modifier::BOLD)))
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(SURFACE0));
+
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let modal_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let visible_lines = modal_layout[0].height as usize;
+            let mut items = Vec::new();
+
+            let ext = std::path::Path::new(title).extension().and_then(|s| s.to_str()).unwrap_or("");
+            let lang = match ext {
+                "rs" => "rust",
+                "py" => "python",
+                _ => "",
+            };
+
+            if let Ok(mut highlighter) = crate::editor::syntax::SyntaxHighlighter::new(lang) {
+                let mut lines = highlighter.highlight(&buffer.rope, *scroll, visible_lines);
+                for (i, mut line) in lines.into_iter().enumerate() {
+                    let actual_line_idx = *scroll + i;
+                    if actual_line_idx == buffer.cursor.line {
+                        // Highlight cursor line
+                        line = line.patch_style(Style::default().bg(SURFACE0));
+                        // A simple way to represent cursor position in text (could be improved)
+                        let prefix = format!("{:3} > ", actual_line_idx + 1);
+                        line.spans.insert(0, Span::styled(prefix, Style::default().fg(YELLOW)));
+                    } else {
+                        let prefix = format!("{:3}   ", actual_line_idx + 1);
+                        line.spans.insert(0, Span::styled(prefix, Style::default().fg(SUBTEXT0)));
+                    }
+                    items.push(ratatui::widgets::ListItem::new(line));
+                }
+            } else {
+                let lines = buffer.lines_for_view(*scroll, visible_lines);
+                for (i, line) in lines.into_iter().enumerate() {
+                    let actual_line_idx = *scroll + i;
+                    let style = if actual_line_idx == buffer.cursor.line {
+                        Style::default().bg(SURFACE0)
+                    } else {
+                        Style::default()
+                    };
+                    
+                    let prefix = if actual_line_idx == buffer.cursor.line {
+                        format!("{:3} > ", actual_line_idx + 1)
+                    } else {
+                        format!("{:3}   ", actual_line_idx + 1)
+                    };
+                    
+                    items.push(ratatui::widgets::ListItem::new(ratatui::text::Line::from(vec![
+                        Span::styled(prefix, Style::default().fg(if actual_line_idx == buffer.cursor.line { YELLOW } else { SUBTEXT0 })),
+                        Span::raw(line)
+                    ])).style(style));
+                }
+            }
+
+            f.render_widget(ratatui::widgets::List::new(items), modal_layout[0]);
+
+            let mode_str = match buffer.mode {
+                crate::editor::buffer::EditorMode::Normal => "NORMAL",
+                crate::editor::buffer::EditorMode::Insert => "INSERT",
+                _ => "VISUAL",
+            };
+            
+            let mode_color = match buffer.mode {
+                crate::editor::buffer::EditorMode::Insert => GREEN,
+                _ => BLUE,
+            };
+            
+            let mod_indicator = if buffer.modified { " [+] " } else { "" };
+
+            let footer = Line::from(vec![
+                Span::styled(format!(" {} ", mode_str), Style::default().fg(CRUST).bg(mode_color).add_modifier(Modifier::BOLD)),
+                Span::styled(mod_indicator, Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)),
+                Span::raw(format!(" Ln {}, Col {} | ", buffer.cursor.line + 1, buffer.cursor.char_idx + 1)),
+                Span::styled(" i ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Insert "),
+                Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Normal "),
+                Span::styled(" Ctrl+S ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Save "),
+                Span::styled(" q ", Style::default().fg(TEXT).bg(SURFACE0)),
+                Span::raw(" Close"),
+            ]);
+            f.render_widget(Paragraph::new(footer), modal_layout[1]);
+        }
         super::app::ModalState::ToolGatekeeper { call, pending_others } => {
-            let block = Block::default()
+            let _block = Block::default()
                 .title(Span::styled(" AGENT // PIPELINE EXECUTION REQUEST ", Style::default().fg(YELLOW).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
@@ -429,7 +486,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             f.render_widget(Paragraph::new(footer), layout[1]);
         }
         super::app::ModalState::CodeGatekeeper { request, pending_others } => {
-            let block = Block::default()
+            let _block = Block::default()
                 .title(Span::styled(" SANDBOX // SCRIPT BLOCK EXECUTION ", Style::default().fg(RED).add_modifier(Modifier::BOLD)))
                 .borders(Borders::BOTTOM)
                 .border_style(Style::default().fg(SURFACE0));
@@ -518,7 +575,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
 
             f.render_widget(List::new(items), horizontal_layout[0]);
 
-            if let Some((lang, code)) = blocks.get(*selected_index) {
+            if let Some((_lang, code)) = blocks.get(*selected_index) {
                 let lines: Vec<Line> = code.lines().map(|line| Line::from(line)).collect();
                 let total_lines = lines.len();
                 let scroll_pos = (*preview_scroll).min(total_lines.saturating_sub(horizontal_layout[1].height as usize));
@@ -537,7 +594,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             ]);
             f.render_widget(Paragraph::new(footer), vertical_layout[1]);
         }
-        super::app::ModalState::WorkspacePanel { files, selected_index, scroll } => {
+        super::app::ModalState::WorkspacePanel { state, selected_index, scroll: _scroll } => {
             let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
             let vertical_layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -545,20 +602,32 @@ fn draw_modal(f: &mut Frame, app: &App) {
                 .split(inner_area);
 
             let mut items = Vec::new();
-            for (i, file) in files.iter().enumerate() {
+            let flat = state.flatten_visible();
+            for (i, (depth, node)) in flat.iter().enumerate() {
                 let is_active = *selected_index == i;
                 let marker = if is_active { "> " } else { "  " };
                 let style = if is_active { Style::default().fg(GREEN).add_modifier(Modifier::BOLD) } else { Style::default().fg(SUBTEXT0) };
 
-                let depth = file.relative_path.matches('/').count();
-                let indent = "  ".repeat(depth);
-                let icon = if file.is_dir { "[D]" } else { "[F]" };
-                let name = file.relative_path.split('/').last().unwrap_or(&file.relative_path);
-                let is_pinned = app.pinned_files.contains(&file.relative_path);
+                let indent = "  ".repeat(*depth);
+                let (icon, name, is_dir) = match node {
+                    crate::explorer::tree::FileNode::Directory { name, is_expanded, .. } => {
+                        (if *is_expanded { "[-]" } else { "[+]" }, name.as_str(), true)
+                    }
+                    crate::explorer::tree::FileNode::File { name, .. } => {
+                        ("[F]", name.as_str(), false)
+                    }
+                };
+                
+                let is_pinned = !is_dir && match node {
+                    crate::explorer::tree::FileNode::File { path, .. } => {
+                        let path_str = path.to_string_lossy().to_string();
+                        app.pinned_files.contains(&path_str) // Might need exact relative path match logic
+                    }
+                    _ => false,
+                };
                 let pin_badge = if is_pinned { " [PIN] " } else { "" };
-                let size_str = if file.is_dir { String::new() } else { format!(" ({}B)", file.size) };
 
-                let display = format!("{}{} {}{}{}", indent, icon, name, pin_badge, size_str);
+                let display = format!("{}{} {}{}", indent, icon, name, pin_badge);
                 items.push(ListItem::new(format!("{}{}", marker, display)).style(style));
             }
 
@@ -569,10 +638,8 @@ fn draw_modal(f: &mut Frame, app: &App) {
             f.render_widget(list, vertical_layout[0]);
 
             let footer = Line::from(vec![
-                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN)),
-                Span::raw(" Read File  "),
-                Span::styled(" P ", Style::default().fg(CRUST).bg(YELLOW)),
-                Span::raw(" Pin File  "),
+                Span::styled(" Enter/Space ", Style::default().fg(CRUST).bg(GREEN)),
+                Span::raw(" Open/Expand  "),
                 Span::styled(" R ", Style::default().fg(CRUST).bg(BLUE)),
                 Span::raw(" Refresh  "),
                 Span::styled(" Esc ", Style::default().fg(TEXT).bg(SURFACE0)),
@@ -580,7 +647,7 @@ fn draw_modal(f: &mut Frame, app: &App) {
             ]);
             f.render_widget(Paragraph::new(footer), vertical_layout[1]);
         }
-        super::app::ModalState::GitStatusModal { status, selected_index, scroll } => {
+        super::app::ModalState::GitStatusModal { status, selected_index, scroll: _scroll } => {
             let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
             let vertical_layout = Layout::default()
                 .direction(Direction::Vertical)
@@ -680,6 +747,51 @@ fn draw_modal(f: &mut Frame, app: &App) {
         }
         super::app::ModalState::ProviderSelection { .. } => {}
         super::app::ModalState::ModelSelection { .. } => {}
+        super::app::ModalState::CommandPalette { selected_index, commands } => {
+            let inner_area = popup_area.inner(Margin { horizontal: 2, vertical: 1 });
+            let vertical_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(0), Constraint::Length(1)])
+                .split(inner_area);
+
+            let mut items = Vec::new();
+            for (i, cmd) in commands.iter().enumerate() {
+                let is_active = *selected_index == i;
+                let marker = if is_active { "> " } else { "  " };
+                
+                let style = if is_active { 
+                    Style::default().fg(BLUE).add_modifier(Modifier::BOLD).bg(SURFACE0)
+                } else { 
+                    Style::default().fg(TEXT)
+                };
+
+                let title_span = Span::styled(format!("{:20}", cmd.title), if is_active { Style::default().fg(GREEN) } else { Style::default().fg(SUBTEXT0) });
+                let desc_span = Span::styled(format!(" - {}", cmd.description), if is_active { Style::default().fg(TEXT) } else { Style::default().fg(SUBTEXT0) });
+
+                let line = Line::from(vec![
+                    Span::raw(marker),
+                    title_span,
+                    desc_span,
+                ]);
+                items.push(ratatui::widgets::ListItem::new(line).style(style));
+            }
+
+            let list = List::new(items)
+                .block(Block::default()
+                    .title(Span::styled(" Command Palette (/) ", Style::default().fg(TEXT).add_modifier(Modifier::BOLD)))
+                    .borders(Borders::BOTTOM)
+                    .border_style(Style::default().fg(SURFACE0)))
+                .highlight_symbol("");
+            f.render_widget(list, vertical_layout[0]);
+
+            let footer = Line::from(vec![
+                Span::styled(" Enter ", Style::default().fg(CRUST).bg(GREEN).add_modifier(Modifier::BOLD)),
+                Span::raw(" Execute  "),
+                Span::styled(" Esc ", Style::default().fg(CRUST).bg(SURFACE0)),
+                Span::raw(" Close"),
+            ]);
+            f.render_widget(Paragraph::new(footer), vertical_layout[1]);
+        }
     }
 }
 

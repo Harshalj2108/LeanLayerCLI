@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::agent::errors::AgentError;
 use crate::agent::mcp::{McpResponse, McpSession};
-use crate::agent::tools::{BashTool, FsReadTool, FsWriteTool, Tool};
+use crate::agent::tools::Tool;
 use crate::agent::workspace::Workspace;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,16 +25,25 @@ pub struct AgentExecutor {
     pub child_process: Child,
     pub session: Arc<McpSession>,
     pub workspace: Workspace,
+    pub workflow_engine: crate::workflow::orchestrator::WorkflowEngine,
+    pub git: std::sync::Arc<crate::integration::git::GitWorkspace>,
+    pub lsp: Option<std::sync::Arc<crate::integration::lsp::LspClient>>,
     retry_count: usize,
 }
 
 impl AgentExecutor {
     pub fn new(child_process: Child, session: Arc<McpSession>, workspace: Workspace) -> Self {
+        let workflow_engine = crate::workflow::orchestrator::WorkflowEngine::new(5, session.clone());
+        let git = std::sync::Arc::new(crate::integration::git::GitWorkspace::new(&workspace.base_path()));
+        
         Self {
             state: ExecutorState::Booting,
             child_process,
             session,
             workspace,
+            workflow_engine,
+            git,
+            lsp: None,
             retry_count: 0,
         }
     }
@@ -42,6 +51,7 @@ impl AgentExecutor {
     pub async fn run(
         mut self,
         mut ui_rx: mpsc::Receiver<String>,
+        agent_tx: mpsc::Sender<crate::tui::app::AgentMessage>,
     ) -> std::result::Result<(), AgentError> {
         'process: loop {
             let mut stdin = self.child_process.stdin.take().ok_or_else(|| {
@@ -72,7 +82,7 @@ impl AgentExecutor {
                     }
                     line = reader.next_line() => {
                         match line.map_err(AgentError::Ipc)? {
-                            Some(line) => self.handle_stdout_line(&line, &mut stdin).await?,
+                            Some(line) => self.handle_stdout_line(&line, &mut stdin, &agent_tx).await?,
                             None => {
                                 self.restart_child_with_backoff().await?;
                                 continue 'process;
@@ -96,8 +106,32 @@ impl AgentExecutor {
         &mut self,
         line: &str,
         stdin: &mut ChildStdin,
+        agent_tx: &mpsc::Sender<crate::tui::app::AgentMessage>,
     ) -> std::result::Result<(), AgentError> {
         let value: serde_json::Value = serde_json::from_str(line)?;
+        
+        // Handle streaming text
+        if let Some(msg_type) = value.get("type").and_then(|t| t.as_str()) {
+            match msg_type {
+                "token" => {
+                    if let Some(content) = value.get("content").and_then(|c| c.as_str()) {
+                        let _ = agent_tx.send(crate::tui::app::AgentMessage::Token(content.to_string())).await;
+                    }
+                }
+                "done" => {
+                    let _ = agent_tx.send(crate::tui::app::AgentMessage::Done).await;
+                }
+                "error" => {
+                    if let Some(msg) = value.get("message").and_then(|m| m.as_str()) {
+                        let _ = agent_tx.send(crate::tui::app::AgentMessage::Status(format!("Error: {}", msg))).await;
+                        let _ = agent_tx.send(crate::tui::app::AgentMessage::Done).await;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
+
         if value.get("method").and_then(|method| method.as_str()) == Some("tool/call") {
             self.handle_tool_call(value, stdin).await?;
             return Ok(());
@@ -135,7 +169,9 @@ impl AgentExecutor {
         self.state = ExecutorState::ExecutingTool(name.clone());
         let workspace = self.workspace.clone();
         let tool_name = name.clone();
-        let task = tokio::spawn(async move { execute_named_tool(&tool_name, args, &workspace).await });
+        let git = self.git.clone();
+        let lsp = self.lsp.clone();
+        let task = tokio::spawn(async move { execute_named_tool(&tool_name, args, &workspace, &git, &lsp).await });
         let result = task
             .await
             .map_err(|err| AgentError::Tool(err.to_string()))?;
@@ -194,11 +230,22 @@ async fn execute_named_tool(
     name: &str,
     args: serde_json::Value,
     workspace: &Workspace,
+    git: &std::sync::Arc<crate::integration::git::GitWorkspace>,
+    lsp: &Option<std::sync::Arc<crate::integration::lsp::LspClient>>,
 ) -> std::result::Result<serde_json::Value, AgentError> {
     match name {
-        "bash" | "run_command" => BashTool.execute(args, workspace).await,
-        "fs_read" | "read_file" => FsReadTool.execute(args, workspace).await,
-        "fs_write" | "write_file" => FsWriteTool.execute(args, workspace).await,
+        "bash" | "run_command" => crate::agent::tools::BashTool.execute(args, workspace).await,
+        "fs_read" | "read_file" => crate::agent::tools::FsReadTool.execute(args, workspace).await,
+        "fs_write" | "write_file" => crate::agent::tools::FsWriteTool.execute(args, workspace).await,
+        "git_status" => crate::agent::tools_integration::GitStatusTool { git: (**git).clone() }.execute(args, workspace).await,
+        "git_commit" => crate::agent::tools_integration::GitCommitTool { git: (**git).clone() }.execute(args, workspace).await,
+        "lsp_hover" => {
+            if let Some(client) = lsp {
+                crate::agent::tools_integration::LspHoverTool { lsp: client.clone() }.execute(args, workspace).await
+            } else {
+                Err(AgentError::Tool("LSP not available".to_string()))
+            }
+        }
         other => Err(AgentError::Tool(format!("unknown tool: {}", other))),
     }
 }
