@@ -55,7 +55,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     draw_modal(f, app);
 }
 
-fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
     let is_focused = matches!(app.focus, Focus::Chat);
     
     // Instead of heavy box borders, we use a top margin line with a clean unicode indicator
@@ -74,39 +74,55 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let mut items: Vec<ListItem> = Vec::new();
+    let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
 
-    for msg in &app.messages {
-        if msg.role == "system" {
-            continue;
-        }
+    // Rebuild cache if width changed or new message arrived
+    if app.chat_cache_width != inner.width || app.chat_cache_msg_count != app.messages.len() {
+        app.chat_cache.clear();
+        for msg in &app.messages {
+            if msg.role == "system" {
+                continue;
+            }
 
-        let (label, color) = match msg.role.as_str() {
-            "user" => ("You", GREEN),
-            "assistant" => ("AI Assistant", MAUVE),
-            _ => ("System", YELLOW),
-        };
+            let label = match msg.role.as_str() {
+                "user" => "You",
+                "assistant" => "AI Assistant",
+                _ => "System",
+            };
 
-        // Streamlined inline line metadata layout rather than chunky badges
-        items.push(ListItem::new(Line::from(vec![
-            Span::styled(format!(">> {}", label), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-        ])));
+            app.chat_cache.push(format!(">> {}", label));
 
-        // Content indented elegantly
-        let md_text = tui_markdown::from_str(&msg.content);
-        let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
-        for line in md_text.lines {
-            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
-            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
-            if wrapped_lines.is_empty() {
-                items.push(ListItem::new(ratatui::text::Line::from("")));
-            } else {
-                for wrapped_line in wrapped_lines {
-                    items.push(ListItem::new(ratatui::text::Line::from(wrapped_line.into_owned())));
+            let md_text = tui_markdown::from_str(&msg.content);
+            for line in md_text.lines {
+                let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
+                let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+                if wrapped_lines.is_empty() {
+                    app.chat_cache.push(String::new());
+                } else {
+                    for wrapped_line in wrapped_lines {
+                        app.chat_cache.push(wrapped_line.into_owned());
+                    }
                 }
             }
+            app.chat_cache.push(String::new()); // Spacing
         }
-        items.push(ListItem::new(Line::from(""))); // Spacing
+        app.chat_cache_width = inner.width;
+        app.chat_cache_msg_count = app.messages.len();
+    }
+
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Render from cache
+    for cached_line in &app.chat_cache {
+        if cached_line.starts_with(">> You") {
+            items.push(ListItem::new(Line::from(vec![Span::styled(cached_line, Style::default().fg(GREEN).add_modifier(Modifier::BOLD))])));
+        } else if cached_line.starts_with(">> AI Assistant") {
+            items.push(ListItem::new(Line::from(vec![Span::styled(cached_line, Style::default().fg(MAUVE).add_modifier(Modifier::BOLD))])));
+        } else if cached_line.starts_with(">> System") {
+            items.push(ListItem::new(Line::from(vec![Span::styled(cached_line, Style::default().fg(YELLOW).add_modifier(Modifier::BOLD))])));
+        } else {
+            items.push(ListItem::new(Line::from(cached_line.clone())));
+        }
     }
 
     // Render active WorkflowPlan
@@ -143,11 +159,12 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
             Span::styled(">> AI Assistant ", Style::default().fg(MAUVE).add_modifier(Modifier::BOLD)),
             Span::styled("|", Style::default().fg(MAUVE).add_modifier(Modifier::RAPID_BLINK)),
         ])));
-        let md_text = tui_markdown::from_str(&app.current_response);
+        
         let wrap_width = (inner.width.saturating_sub(2) as usize).max(10);
-        for line in md_text.lines {
-            let raw_text: String = line.spans.into_iter().map(|s| s.content).collect();
-            let wrapped_lines = textwrap::wrap(&raw_text, wrap_width);
+        
+        // Fast path for generation: avoid expensive markdown parser on long partial responses
+        for line in app.current_response.lines() {
+            let wrapped_lines = textwrap::wrap(line, wrap_width);
             if wrapped_lines.is_empty() {
                 items.push(ListItem::new(ratatui::text::Line::from("")));
             } else {

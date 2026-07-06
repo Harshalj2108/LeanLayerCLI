@@ -191,6 +191,9 @@ pub struct App<'a> {
     pub lsp_client: Option<std::sync::Arc<crate::integration::lsp::LspClient>>,
     pub memory: std::sync::Arc<crate::memory::graph::GraphMemory>,
     pub current_plan: Option<crate::workflow::plan::WorkflowPlan>,
+    pub chat_cache: Vec<String>,
+    pub chat_cache_width: u16,
+    pub chat_cache_msg_count: usize,
 }
 
 impl<'a> App<'a> {
@@ -268,6 +271,9 @@ impl<'a> App<'a> {
             lsp_client,
             memory: std::sync::Arc::new(crate::memory::graph::GraphMemory::new()),
             current_plan: None,
+            chat_cache: Vec::new(),
+            chat_cache_width: 0,
+            chat_cache_msg_count: 0,
         };
         
         eprintln!("[boot] Spawning MCP servers...");
@@ -409,6 +415,14 @@ impl<'a> App<'a> {
                         });
                         
                         let tool_calls = crate::agent::tools::parse_tool_calls(&self.current_response);
+                        let step_completed_explicitly = self.current_response.contains("<STEP_COMPLETE>");
+                        
+                        if step_completed_explicitly {
+                            if let Some(plan) = &mut self.current_plan {
+                                plan.advance();
+                            }
+                        }
+
                         if !tool_calls.is_empty() {
                             let mut pending = tool_calls;
 
@@ -581,6 +595,38 @@ impl<'a> App<'a> {
         }
         if needs_token_update {
             self.update_token_count();
+        }
+
+        // Auto-advance WorkflowPlan if idle
+        if !self.is_generating && self.active_modal.is_none() {
+            let mut plan_completed = false;
+            if let Some(plan) = &mut self.current_plan {
+                if plan.current_step_index < plan.steps.len() {
+                    let step = &mut plan.steps[plan.current_step_index];
+                    if step.status == crate::workflow::plan::StepStatus::Pending {
+                        step.status = crate::workflow::plan::StepStatus::InProgress;
+                        
+                        let step_desc = step.description.clone();
+                        self.messages.push(ChatMessage {
+                            role: "system".into(),
+                            content: format!("Executing Workflow Step {}/{}: {}\n(If complete, reply with `<STEP_COMPLETE>`)", plan.current_step_index + 1, plan.steps.len(), step_desc),
+                            images: None,
+                        });
+                        
+                        let _ = self.trigger_backend();
+                    }
+                } else if plan.current_step_index == plan.steps.len() {
+                    plan_completed = true;
+                }
+            }
+            if plan_completed {
+                self.messages.push(ChatMessage {
+                    role: "system".into(),
+                    content: "Workflow plan completed.".into(),
+                    images: None,
+                });
+                self.current_plan = None;
+            }
         }
     }
 
@@ -1107,6 +1153,11 @@ impl<'a> App<'a> {
                                 content: crate::agent::tools::format_tool_result(&call, &out, success),
                                 images: None,
                             });
+
+                            if let Some(plan) = &mut self.current_plan {
+                                plan.advance();
+                            }
+
                             self.active_modal = None;
                             let _ = self.trigger_backend();
                         }
