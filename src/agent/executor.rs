@@ -454,6 +454,67 @@ pub async fn execute_web_search(query: &str) -> Result<ExecutionStatus> {
     }
 }
 
+pub async fn execute_web_scrape(url: &str, selector: Option<&str>) -> Result<ExecutionStatus> {
+    let client = reqwest::Client::new();
+    let response = client.get(url)
+        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await;
+
+    match response {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return Ok(ExecutionStatus::Failed(format!("HTTP error {}: {}", resp.status(), url)));
+            }
+
+            let html = resp.text().await.unwrap_or_default();
+            let document = scraper::Html::parse_document(&html);
+            
+            let extracted_text = if let Some(sel_str) = selector {
+                if let Ok(sel) = scraper::Selector::parse(sel_str) {
+                    let mut text = String::new();
+                    for element in document.select(&sel) {
+                        for text_node in element.text() {
+                            text.push_str(text_node);
+                            text.push(' ');
+                        }
+                        text.push('\n');
+                    }
+                    text
+                } else {
+                    return Ok(ExecutionStatus::Failed(format!("Invalid CSS selector: {}", sel_str)));
+                }
+            } else {
+                // If no selector, extract from body or everything
+                let body_sel = scraper::Selector::parse("body").unwrap();
+                if let Some(body) = document.select(&body_sel).next() {
+                    body.text().collect::<Vec<_>>().join(" ")
+                } else {
+                    document.root_element().text().collect::<Vec<_>>().join(" ")
+                }
+            };
+            
+            // Cleanup whitespace
+            let cleaned = extracted_text.split_whitespace().collect::<Vec<_>>().join(" ");
+            
+            // Truncate if too long (e.g. 20,000 chars)
+            let mut final_text = cleaned;
+            if final_text.len() > 20000 {
+                final_text.truncate(20000);
+                final_text.push_str("\n...[truncated due to length]");
+            }
+
+            Ok(ExecutionStatus::Completed {
+                stdout: final_text,
+                stderr: "".into(),
+                exit_code: 0,
+            })
+        }
+        Err(e) => Ok(ExecutionStatus::Failed(format!("Web scrape failed: {}", e))),
+    }
+}
+
 fn parse_duckduckgo_html(html: &str) -> Vec<(String, String, String)> {
     let mut results = Vec::new();
 

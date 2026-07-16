@@ -16,7 +16,6 @@ pub enum Commands {
         #[arg(long, help = "Open interactive configuration editor")]
         edit: bool,
     },
-    /// Manage encrypted vault
     Vault {
         #[arg(short, long)]
         set_key: Option<String>,

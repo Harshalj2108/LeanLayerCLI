@@ -472,6 +472,9 @@ impl<'a> App<'a> {
                                     crate::agent::tools::ToolCall::WebSearch { query } => {
                                         crate::agent::executor::execute_web_search(query).await
                                     }
+                                    crate::agent::tools::ToolCall::WebScrape { url, selector } => {
+                                        crate::agent::executor::execute_web_scrape(url, selector.as_deref()).await
+                                    }
                                     crate::agent::tools::ToolCall::McpToolCall { server, name, args } => {
                                         crate::agent::executor::execute_mcp_tool(&self.mcp_clients, server, name, args.clone()).await
                                     }
@@ -796,6 +799,10 @@ impl<'a> App<'a> {
                                 crate::agent::tools::ToolCall::WebSearch { query } => {
                                     self.status = format!("Searching the web: {}...", query);
                                     crate::agent::executor::execute_web_search(query).await
+                                }
+                                crate::agent::tools::ToolCall::WebScrape { url, selector } => {
+                                    self.status = format!("Scraping web: {}...", url);
+                                    crate::agent::executor::execute_web_scrape(url, selector.as_deref()).await
                                 }
                                 crate::agent::tools::ToolCall::McpToolCall { server, name, args } => {
                                     self.status = format!("Calling MCP {}/{}...", server, name);
@@ -1809,6 +1816,9 @@ impl App<'static> {
             lsp_client: None,
             current_plan: None,
             memory: std::sync::Arc::new(crate::memory::graph::GraphMemory::new()),
+            chat_cache: Vec::new(),
+            chat_cache_width: 0,
+            chat_cache_msg_count: 0,
         }
     }
 }

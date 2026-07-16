@@ -30,7 +30,7 @@ impl Backend {
         let api_key = crate::config::resolve_api_key(cfg).await;
         let api_model = cfg.api_model.clone();
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .connect_timeout(std::time::Duration::from_secs(15))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
         let rate_limiter = RateLimiterHandle::new(40);
@@ -559,13 +559,33 @@ async fn stream_openai_chunks(
     let mut stream = resp.bytes_stream();
     let mut line_buf = String::new();
     let mut in_think = false;
-
     let mut token_count = 0;
+    let mut chunk_count = 0;
 
-    while let Some(chunk_res) = stream.next().await {
+    loop {
+        // 30-second idle timeout per chunk — if the API goes silent, we bail gracefully
+        let chunk_res = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            stream.next(),
+        ).await {
+            Ok(Some(res)) => res,
+            Ok(None) => break,  // Stream ended normally
+            Err(_timeout) => {
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "STREAM TIMEOUT after {} tokens (30s idle)", token_count)
+                });
+                break; // Treat timeout as end of stream
+            }
+        };
+        
         let chunk = match chunk_res {
             Ok(c) => c,
             Err(e) => {
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "STREAM ERROR after {} tokens: {}", token_count, e)
+                });
                 if token_count > 0 {
                     tx.send(BackendMessage::Done).ok();
                     return Ok(());
@@ -574,74 +594,132 @@ async fn stream_openai_chunks(
                 }
             }
         };
-        let s = String::from_utf8_lossy(&chunk);
+
+        chunk_count += 1;
+        let text = String::from_utf8_lossy(&chunk);
         
-        for ch in s.chars() {
-            if ch == '\n' {
-                if !line_buf.starts_with("data:") {
+        // Log first few raw chunks for debugging
+        if chunk_count <= 5 {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "RAW CHUNK #{} ({} bytes): {:?}", chunk_count, chunk.len(), &text[..text.len().min(500)])
+            });
+        }
+        
+        // SSE lines are separated by \n or \r\n. Process line by line.
+        for line in text.split('\n') {
+            let line = line.trim_end_matches('\r');
+            
+            // Empty line = SSE event boundary, skip
+            if line.is_empty() {
+                // If line_buf has content, process it
+                if !line_buf.is_empty() {
+                    process_sse_line(&line_buf, &tx, &mut token_count, &mut in_think);
                     line_buf.clear();
-                    continue;
                 }
-                let data = line_buf[5..].trim();
-                if data == "[DONE]" {
-                    tx.send(BackendMessage::Done).ok();
-                    return Ok(());
-                }
-                if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(delta) = chunk["choices"][0]["delta"].as_object() {
-                        let mut text = String::new();
-                        if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
-                            text.push_str(reasoning);
-                        }
-                        if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
-                            let mut c = content.to_string();
-                            if c.contains("<think>") {
-                                in_think = true;
-                                c = c.replace("<think>", "");
-                            }
-                            if c.contains("</think>") {
-                                in_think = false;
-                                c = c.replace("</think>", "");
-                            }
-                            if !in_think && !c.is_empty() {
-                                text.push_str(&c);
-                            }
-                        }
-                        if !text.is_empty() {
-                            token_count += 1;
-                            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
-                                use std::io::Write;
-                                writeln!(f, "TOKEN: {}", text)
-                            });
-                            tx.send(BackendMessage::Token {
-                                content: text,
-                            }).ok();
-                        } else {
-                            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
-                                use std::io::Write;
-                                writeln!(f, "EMPTY TEXT FROM CHUNK: {}", chunk)
-                            });
-                        }
-                    } else {
-                        let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
-                            use std::io::Write;
-                            writeln!(f, "NO DELTA IN CHUNK: {}", chunk)
-                        });
-                    }
-                } else {
-                    let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
-                        use std::io::Write;
-                        writeln!(f, "FAILED TO PARSE JSON: {}", data)
-                    });
-                }
+                continue;
+            }
+            
+            // Accumulate into line_buf (handles split chunks)
+            line_buf.push_str(line);
+            
+            // If the line starts with "data:", process immediately
+            // (most SSE events are single-line)
+            if line_buf.starts_with("data:") {
+                process_sse_line(&line_buf, &tx, &mut token_count, &mut in_think);
                 line_buf.clear();
-            } else {
-                line_buf.push(ch);
             }
         }
     }
+    
+    // Process any remaining data in line_buf
+    if !line_buf.is_empty() {
+        process_sse_line(&line_buf, &tx, &mut token_count, &mut in_think);
+    }
+    
+    let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+        use std::io::Write;
+        writeln!(f, "STREAM ENDED: {} chunks, {} tokens", chunk_count, token_count)
+    });
+    
     tx.send(BackendMessage::Done).ok();
     Ok(())
+}
+
+fn process_sse_line(
+    line: &str,
+    tx: &mpsc::UnboundedSender<BackendMessage>,
+    token_count: &mut usize,
+    in_think: &mut bool,
+) {
+    if !line.starts_with("data:") {
+        return;
+    }
+    let data = line[5..].trim();
+    if data.is_empty() {
+        return;
+    }
+    if data == "[DONE]" {
+        tx.send(BackendMessage::Done).ok();
+        return;
+    }
+    match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(chunk) => {
+            // Check for finish_reason
+            if let Some(finish) = chunk["choices"][0]["finish_reason"].as_str() {
+                if finish == "stop" || finish == "length" {
+                    let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                        use std::io::Write;
+                        writeln!(f, "FINISH_REASON: {}", finish)
+                    });
+                }
+            }
+            
+            if let Some(delta) = chunk["choices"][0]["delta"].as_object() {
+                let mut text = String::new();
+                if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()) {
+                    text.push_str(reasoning);
+                }
+                if let Some(content) = delta.get("content").and_then(|v| v.as_str()) {
+                    let mut c = content.to_string();
+                    if c.contains("<think>") {
+                        *in_think = true;
+                        c = c.replace("<think>", "");
+                    }
+                    if c.contains("</think>") {
+                        *in_think = false;
+                        c = c.replace("</think>", "");
+                    }
+                    if !*in_think && !c.is_empty() {
+                        text.push_str(&c);
+                    }
+                }
+                if !text.is_empty() {
+                    *token_count += 1;
+                    if *token_count <= 10 {
+                        let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                            use std::io::Write;
+                            writeln!(f, "TOKEN #{}: {}", token_count, text)
+                        });
+                    }
+                    tx.send(BackendMessage::Token {
+                        content: text,
+                    }).ok();
+                }
+            } else {
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                    use std::io::Write;
+                    writeln!(f, "NO DELTA IN CHUNK: {}", chunk)
+                });
+            }
+        }
+        Err(e) => {
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open("stream_debug.log").and_then(|mut f| {
+                use std::io::Write;
+                writeln!(f, "JSON PARSE ERROR: {} | data: {}", e, &data[..data.len().min(200)])
+            });
+        }
+    }
 }
 
 /// Parse Anthropic's SSE streaming response format

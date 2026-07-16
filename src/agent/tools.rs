@@ -186,6 +186,12 @@ pub enum ToolCall {
     WebSearch {
         query: String,
     },
+    /// Fetch and extract text content from a URL
+    WebScrape {
+        url: String,
+        #[serde(default)]
+        selector: Option<String>,
+    },
     /// Call a tool on an external MCP server
     #[serde(rename = "mcp_tool")]
     McpToolCall {
@@ -245,6 +251,7 @@ pub fn format_tool_result(call: &ToolCall, output: &str, success: bool) -> Strin
         ToolCall::WriteFile { path, .. } => format!("write_file: {}", path),
         ToolCall::SearchFiles { query, .. } => format!("search: {}", query),
         ToolCall::WebSearch { query } => format!("web_search: {}", query),
+        ToolCall::WebScrape { url, .. } => format!("web_scrape: {}", url),
         ToolCall::McpToolCall { server, name, .. } => format!("mcp_tool: {}/{}", server, name),
         ToolCall::GitStatus => format!("git_status"),
         ToolCall::GitCommit { message } => format!("git_commit: {}", message),
@@ -297,19 +304,25 @@ Search the internet for information:
 {{"tool": "web_search", "query": "search query here"}}
 ```
 
-### 6. Git Status
+### 6. Web Scrape
+Fetch and extract readable text content from any URL. Optionally filter by a CSS-like tag selector:
+```tool
+{{"tool": "web_scrape", "url": "https://example.com/page", "selector": "article"}}
+```
+
+### 7. Git Status
 Get the status of the current git repository:
 ```tool
 {{"tool": "git_status"}}
 ```
 
-### 7. Git Commit
+### 8. Git Commit
 Commit all staged and unstaged changes:
 ```tool
 {{"tool": "git_commit", "message": "commit message"}}
 ```
 
-### 8. LSP Hover
+### 9. LSP Hover
 Hover over a code symbol using the Language Server Protocol:
 ```tool
 {{"tool": "lsp_hover", "file_uri": "/path/to/file.rs", "line": 10, "character": 5}}
